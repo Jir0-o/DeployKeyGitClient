@@ -12,3 +12,4 @@ C:\Users\Jiro\Desktop\DeployKeyGitClient\obj\Debug\net8.0-windows\refint\DeployK
 C:\Users\Jiro\Desktop\DeployKeyGitClient\obj\Debug\net8.0-windows\DeployKeyGitClient.pdb
 C:\Users\Jiro\Desktop\DeployKeyGitClient\obj\Debug\net8.0-windows\DeployKeyGitClient.genruntimeconfig.cache
 C:\Users\Jiro\Desktop\DeployKeyGitClient\obj\Debug\net8.0-windows\ref\DeployKeyGitClient.dll
+C:\Users\Jiro\Desktop\DeployKeyGitClient\obj\Debug\net8.0-windows\DeployKeyGitClient.sourcelink.json
