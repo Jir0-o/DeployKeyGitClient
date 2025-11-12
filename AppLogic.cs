@@ -3,7 +3,6 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
 using System.Linq;
-using System.Net;
 using System.Text;
 using System.Text.RegularExpressions;
 using System.Threading.Tasks;
@@ -21,7 +20,50 @@ namespace DeployKeyGitClient
             public string Password = "";
         }
 
-        // --- High-level operations used by UI ---
+        // Directory under project root where protected function bodies are stored
+        private const string ProtectedStoreFolderName = ".deploy_protected";
+
+        // Expose method for UI to kill current child process
+        private static readonly object _procLock = new object();
+        private static Process? _currentProcess;
+        public static void KillCurrentProcess()
+        {
+            lock (_procLock)
+            {
+                try { if (_currentProcess != null && !_currentProcess.HasExited) _currentProcess.Kill(true); } catch { }
+            }
+        }
+
+        // Helper to save public/private key text to a folder (used by MainForm Save)
+        public static void SaveKeysToFolder(string keyFolder, string publicKeyText, string? privatePem = null)
+        {
+            if (string.IsNullOrEmpty(keyFolder)) throw new ArgumentException("keyFolder required");
+            var sshDir = Path.Combine(keyFolder, ".ssh");
+            Directory.CreateDirectory(sshDir);
+            File.WriteAllText(Path.Combine(sshDir, "deploy_key.pub"), publicKeyText ?? "");
+            if (!string.IsNullOrEmpty(privatePem))
+            {
+                File.WriteAllText(Path.Combine(sshDir, "deploy_key"), privatePem);
+            }
+        }
+
+        // Helper to load public key from a folder (returns null if not found)
+        public static string? LoadPublicKeyFromFolder(string keyFolder)
+        {
+            if (string.IsNullOrEmpty(keyFolder)) return null;
+            var candidates = new[] {
+                Path.Combine(keyFolder, ".ssh", "deploy_key.pub"),
+                Path.Combine(keyFolder, "deploy_key.pub")
+            };
+            foreach (var c in candidates)
+            {
+                if (File.Exists(c)) return File.ReadAllText(c, Encoding.UTF8);
+            }
+            return null;
+        }
+
+        // --- High-level operations used by UI (clone/pull/sql etc) ---
+        // (Existing methods kept; unchanged except process helpers have shared _currentProcess)
 
         public static async Task CloneIntoTempThenMoveAsync(string gitUrl, string targetFolder, Action<int>? progress, Action<string> log, string? privateKeyPath = null)
         {
@@ -38,14 +80,17 @@ namespace DeployKeyGitClient
                 var env = CreateGitSshEnv(privateKeyPath);
                 var r = await RunProcessCaptureAsync("git", $"clone \"{sshUrl}\" \"{tempRepo}\"", env, null, log);
                 log($"git clone exit {r.code}");
-                if (r.code != 0) throw new Exception($"git clone failed: {r.stderr}");
+                if (r.code != 0)
+                {
+                    log("git clone failed: " + r.stderr);
+                    throw new Exception("git clone failed: " + r.stderr);
+                }
 
                 progress?.Invoke(60);
 
                 // move or copy into target
                 if (Directory.Exists(targetFolder) && Directory.EnumerateFileSystemEntries(targetFolder).Any())
                 {
-                    // ensure caller already confirmed deletion
                     TryDeleteDirectory(targetFolder, log);
                     Directory.CreateDirectory(targetFolder);
                 }
@@ -55,9 +100,9 @@ namespace DeployKeyGitClient
                     Directory.Move(tempRepo, targetFolder);
                     log("Moved temp repo into target using Directory.Move.");
                 }
-                catch
+                catch (Exception ex)
                 {
-                    log("Directory.Move failed. Falling back to recursive copy.");
+                    log("Directory.Move failed. Falling back to recursive copy. " + ex.Message);
                     CopyDirectoryRecursive(tempRepo, targetFolder, log);
                 }
 
@@ -108,8 +153,12 @@ namespace DeployKeyGitClient
             }
 
             progress?.Invoke(100);
+
+            // After pull, reapply protected functions if any present
+            await ReapplyProtectedFunctionsAsync(targetFolder, log);
         }
 
+        // SQL import / backup / env creation - unchanged from previous, included for completeness
         public static async Task<bool> ImportSqlFileAsync(string sqlFilePath, DbInfo db, Action<string> log)
         {
             log($"Importing SQL file {sqlFilePath} into {db.Host}:{db.Port} DB `{db.Database}`");
@@ -213,39 +262,187 @@ namespace DeployKeyGitClient
             await ToggleSkipWorktreeInternal(projectRoot, relPath, null, log);
         }
 
-        // Replace or set skip-worktree; used both by UI and AppLogic earlier
+        // internal helper used by ToggleSkipWorktreeAsync and other callers
         private static async Task ToggleSkipWorktreeInternal(string projectRoot, string relPath, bool? setSkip, Action<string> log)
         {
-            var path = relPath.Replace('/', Path.DirectorySeparatorChar).TrimStart(Path.DirectorySeparatorChar);
-            var check = await RunProcessCaptureAsync("git", $"ls-files -v \"{path}\"", null, projectRoot, log);
-            var isSkipped = (check.stdout ?? "").Split('\n').Any(l => l.Length > 0 && l[0] == 'S');
+            try
+            {
+                var path = relPath.Replace('/', Path.DirectorySeparatorChar).TrimStart(Path.DirectorySeparatorChar);
+                // Check current skip-worktree status
+                var check = await RunProcessCaptureAsync("git", $"ls-files -v \"{path}\"", null, projectRoot, log);
+                var isSkipped = (check.stdout ?? "").Split('\n').Any(l => l.Length > 0 && l[0] == 'S');
 
-            if (setSkip == true)
-            {
-                var r = await RunProcessCaptureAsync("git", $"update-index --skip-worktree \"{path}\"", null, projectRoot, log);
-                log($"git update-index --skip-worktree exit {r.code}");
-            }
-            else if (setSkip == false)
-            {
-                var r = await RunProcessCaptureAsync("git", $"update-index --no-skip-worktree \"{path}\"", null, projectRoot, log);
-                log($"git update-index --no-skip-worktree exit {r.code}");
-            }
-            else
-            {
-                if (isSkipped)
+                if (setSkip == true)
+                {
+                    var r = await RunProcessCaptureAsync("git", $"update-index --skip-worktree \"{path}\"", null, projectRoot, log);
+                    log?.Invoke($"git update-index --skip-worktree exit {r.code}");
+                }
+                else if (setSkip == false)
                 {
                     var r = await RunProcessCaptureAsync("git", $"update-index --no-skip-worktree \"{path}\"", null, projectRoot, log);
-                    log($"Unmarked skip-worktree for {path} exit {r.code}");
+                    log?.Invoke($"git update-index --no-skip-worktree exit {r.code}");
                 }
                 else
                 {
-                    var r = await RunProcessCaptureAsync("git", $"update-index --skip-worktree \"{path}\"", null, projectRoot, log);
-                    log($"Marked skip-worktree for {path} exit {r.code}");
+                    if (isSkipped)
+                    {
+                        var r = await RunProcessCaptureAsync("git", $"update-index --no-skip-worktree \"{path}\"", null, projectRoot, log);
+                        log?.Invoke($"Unmarked skip-worktree for {path} (exit {r.code})");
+                    }
+                    else
+                    {
+                        var r = await RunProcessCaptureAsync("git", $"update-index --skip-worktree \"{path}\"", null, projectRoot, log);
+                        log?.Invoke($"Marked skip-worktree for {path} (exit {r.code})");
+                    }
                 }
+            }
+            catch (Exception ex)
+            {
+                log?.Invoke("ToggleSkipWorktreeInternal error: " + ex.Message);
             }
         }
 
-        // Apply ProcessorId to BackofficeLoginController and mark skip-worktree
+
+        // ---------------- Function-protect workflow ----------------
+
+        /// <summary>
+        /// Save a function body from a PHP controller into the protected store.
+        /// The stored file will be under: {projectRoot}/.deploy_protected/<controller-file-name>__<function>.php
+        /// </summary>
+        public static async Task<bool> ProtectFunctionAsync(string projectRoot, string controllerRelPath, string functionName, Action<string> log)
+        {
+            try
+            {
+                var controllerFile = Path.Combine(projectRoot, controllerRelPath.Replace('/', Path.DirectorySeparatorChar));
+                if (!File.Exists(controllerFile)) { log("Controller file not found: " + controllerFile); return false; }
+
+                var text = await File.ReadAllTextAsync(controllerFile, Encoding.UTF8);
+
+                // find function definition (basic PHP function inside class: public function check(Request $request) { ... })
+                // This is a best-effort regex. It handles 'public/private/protected function fname(...) { ... }'
+                var pattern = $@"(public|protected|private)\s+function\s+{Regex.Escape(functionName)}\s*\([^\)]*\)\s*\{{";
+                var m = Regex.Match(text, pattern);
+                if (!m.Success) { log($"Function '{functionName}' not found with expected signature."); return false; }
+
+                var startIndex = m.Index + m.Length - 1; // index of '{'
+                // Find matching closing brace for that function body
+                int braceLevel = 1;
+                int i = startIndex + 1;
+                while (i < text.Length && braceLevel > 0)
+                {
+                    if (text[i] == '{') braceLevel++;
+                    else if (text[i] == '}') braceLevel--;
+                    i++;
+                }
+                if (braceLevel != 0) { log("Failed to parse function body - unmatched braces."); return false; }
+
+                var body = text.Substring(startIndex + 1, i - startIndex - 2); // inner content
+
+                // store body to protected folder
+                var storeDir = Path.Combine(projectRoot, ProtectedStoreFolderName);
+                Directory.CreateDirectory(storeDir);
+                var safeControllerName = Path.GetFileName(controllerFile).Replace('.', '_');
+                var storeFileName = $"{safeControllerName}__{functionName}.body.php";
+                var storePath = Path.Combine(storeDir, storeFileName);
+                await File.WriteAllTextAsync(storePath, body, Encoding.UTF8);
+                log("Saved function body to " + storePath);
+
+                // Also write a small metadata file listing mapping (optional)
+                var metaPath = Path.Combine(storeDir, "index.txt");
+                var metaLine = $"{controllerRelPath.Replace('\\','/')}|{functionName}|{storeFileName}";
+                File.AppendAllText(metaPath, metaLine + Environment.NewLine, Encoding.UTF8);
+
+                return true;
+            }
+            catch (Exception ex)
+            {
+                log("ProtectFunctionAsync error: " + ex.Message);
+                return false;
+            }
+        }
+
+        /// <summary>
+        /// Reapply protected function bodies stored in .deploy_protected to their controller files.
+        /// This will search for matching controller and function and replace the function body with stored body.
+        /// </summary>
+        public static async Task<bool> ReapplyProtectedFunctionsAsync(string projectRoot, Action<string> log)
+        {
+            try
+            {
+                var storeDir = Path.Combine(projectRoot, ProtectedStoreFolderName);
+                if (!Directory.Exists(storeDir)) { log("No protected store found."); return false; }
+
+                var indexPath = Path.Combine(storeDir, "index.txt");
+                IEnumerable<string> lines;
+                if (File.Exists(indexPath))
+                    lines = File.ReadAllLines(indexPath, Encoding.UTF8).Select(l => l.Trim()).Where(l => !string.IsNullOrEmpty(l));
+                else
+                {
+                    // fallback: find files matching pattern
+                    lines = Directory.GetFiles(storeDir, "*.body.php").Select(f =>
+                    {
+                        var fname = Path.GetFileName(f); // <controller>__<fn>.body.php
+                        var parts = fname.Split(new[] { "__" }, StringSplitOptions.None);
+                        if (parts.Length >= 2)
+                        {
+                            var ctrlFile = parts[0].Replace('_', '.'); // approximate
+                            var fn = parts[1].Replace(".body.php", "");
+                            return $"{ctrlFile}|{fn}|{fname}";
+                        }
+                        return null;
+                    }).Where(s => s != null).Cast<string>();
+                }
+
+                var reappliedCount = 0;
+                foreach (var line in lines)
+                {
+                    var parts = line.Split('|');
+                    if (parts.Length < 3) continue;
+                    var rel = parts[0];
+                    var fn = parts[1];
+                    var storeFile = parts[2];
+                    var storePath = Path.Combine(storeDir, storeFile);
+                    if (!File.Exists(storePath)) { log($"Stored body not found: {storePath}"); continue; }
+
+                    var controllerFile = Path.Combine(projectRoot, rel.Replace('/', Path.DirectorySeparatorChar));
+                    if (!File.Exists(controllerFile)) { log($"Controller file not found: {controllerFile}, skipping."); continue; }
+
+                    var text = await File.ReadAllTextAsync(controllerFile, Encoding.UTF8);
+                    var pattern = $@"(public|protected|private)\s+function\s+{Regex.Escape(fn)}\s*\([^\)]*\)\s*\{{";
+                    var m = Regex.Match(text, pattern);
+                    if (!m.Success) { log($"Function '{fn}' not found in {rel}."); continue; }
+
+                    var startIndex = m.Index + m.Length - 1;
+                    int braceLevel = 1;
+                    int i = startIndex + 1;
+                    while (i < text.Length && braceLevel > 0)
+                    {
+                        if (text[i] == '{') braceLevel++;
+                        else if (text[i] == '}') braceLevel--;
+                        i++;
+                    }
+                    if (braceLevel != 0) { log($"Failed to parse function body for {fn} in {rel}."); continue; }
+
+                    var newBody = await File.ReadAllTextAsync(storePath, Encoding.UTF8);
+                    // Surround newBody with exact same indentation as original open brace line
+                    var before = text.Substring(0, startIndex + 1);
+                    var after = text.Substring(i - 1); // starts with closing brace
+                    var updated = before + Environment.NewLine + newBody + Environment.NewLine + after;
+                    await File.WriteAllTextAsync(controllerFile, updated, Encoding.UTF8);
+                    log($"Reapplied protected function '{fn}' into {rel}");
+                    reappliedCount++;
+                }
+
+                return reappliedCount > 0;
+            }
+            catch (Exception ex)
+            {
+                log("ReapplyProtectedFunctionsAsync error: " + ex.Message);
+                return false;
+            }
+        }
+
+        // For convenience: a helper that applies ProcessorId into Backoffice controller (existing)
         public static async Task<bool> ApplyProcessorIdToBackofficeControllerAsync(string projectRoot, Action<string> log)
         {
             // get ProcessorId
@@ -283,12 +480,30 @@ namespace DeployKeyGitClient
                 return false;
             }
 
-            // protect file
+            // protect file (file-level)
             await ToggleSkipWorktreeInternal(projectRoot, rel, true, log);
             return true;
         }
 
-        // --- Utilities and process helpers ---
+        // --- Utilities and process helpers (same as before but shared _currentProcess) ---
+
+        public static (string, string)[] CreateGitSshEnv(string? privateKeyPath)
+        {
+            try
+            {
+                if (string.IsNullOrEmpty(privateKeyPath)) return Array.Empty<(string, string)>();
+                var knownHosts = Path.Combine(Path.GetTempPath(), $"ssh_known_hosts_{Guid.NewGuid():N}.txt");
+                File.WriteAllText(knownHosts, "");
+                var gitSsh = $"ssh -i \"{privateKeyPath}\" -o IdentitiesOnly=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=\"{knownHosts}\"";
+                return new[] { ("GIT_SSH_COMMAND", gitSsh) };
+            }
+            catch
+            {
+                if (string.IsNullOrEmpty(privateKeyPath)) return Array.Empty<(string, string)>();
+                var gitSsh = $"ssh -i \"{privateKeyPath}\" -o IdentitiesOnly=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=NUL";
+                return new[] { ("GIT_SSH_COMMAND", gitSsh) };
+            }
+        }
 
         private static string ConvertToSshIfHttps(string url)
         {
@@ -351,26 +566,7 @@ namespace DeployKeyGitClient
             throw new Exception($"Unable to delete directory '{path}'. Close open handles and try again.");
         }
 
-        // Create GIT_SSH_COMMAND env override (same as earlier MainForm's helper)
-        public static (string, string)[] CreateGitSshEnv(string? privateKeyPath)
-        {
-            try
-            {
-                if (string.IsNullOrEmpty(privateKeyPath)) return Array.Empty<(string, string)>();
-                var knownHosts = Path.Combine(Path.GetTempPath(), $"ssh_known_hosts_{Guid.NewGuid():N}.txt");
-                File.WriteAllText(knownHosts, "");
-                var gitSsh = $"ssh -i \"{privateKeyPath}\" -o IdentitiesOnly=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=\"{knownHosts}\"";
-                return new[] { ("GIT_SSH_COMMAND", gitSsh) };
-            }
-            catch
-            {
-                if (string.IsNullOrEmpty(privateKeyPath)) return Array.Empty<(string, string)>();
-                var gitSsh = $"ssh -i \"{privateKeyPath}\" -o IdentitiesOnly=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=NUL";
-                return new[] { ("GIT_SSH_COMMAND", gitSsh) };
-            }
-        }
-
-        // Process helpers - robust single-complete result and stdout/stderr capture
+        // Process helpers: set shared _currentProcess so UI can kill
         private static async Task<(int code, string stdout, string stderr)> RunProcessCaptureAsync(string file, string args, (string, string)[]? env, string? workingDir, Action<string> log)
         {
             var psi = new ProcessStartInfo
@@ -391,12 +587,13 @@ namespace DeployKeyGitClient
             var sbOut = new StringBuilder();
             var sbErr = new StringBuilder();
 
-            using var proc = new Process { StartInfo = psi, EnableRaisingEvents = true };
+            var proc = new Process { StartInfo = psi, EnableRaisingEvents = true };
             proc.OutputDataReceived += (s, e) => { if (e.Data != null) { sbOut.AppendLine(e.Data); log?.Invoke(e.Data); } };
             proc.ErrorDataReceived += (s, e) => { if (e.Data != null) { sbErr.AppendLine(e.Data); log?.Invoke("ERR: " + e.Data); } };
 
             try
             {
+                lock (_procLock) { _currentProcess = proc; }
                 if (!proc.Start()) throw new Exception("Failed to start: " + file);
                 proc.BeginOutputReadLine();
                 proc.BeginErrorReadLine();
@@ -408,6 +605,10 @@ namespace DeployKeyGitClient
                 log?.Invoke("RunProcessCaptureAsync error: " + ex.Message);
                 return (-1, sbOut.ToString(), sbErr.ToString() + Environment.NewLine + ex.Message);
             }
+            finally
+            {
+                try { lock (_procLock) { proc?.Dispose(); _currentProcess = null; } } catch { }
+            }
         }
 
         private static async Task<int> RunProcessCaptureToFileAsync(string file, string args, string outputFile, (string, string)[]? env, Action<string> log)
@@ -417,7 +618,7 @@ namespace DeployKeyGitClient
                 var r = await RunProcessCaptureAsync(file, args, env, null, log);
                 if (r.code == 0 && !string.IsNullOrEmpty(r.stdout))
                 {
-                    // If mysqldump wrote to stdout then write to file
+                    // If program wrote dump to stdout (mysqldump), write to file
                     await File.WriteAllTextAsync(outputFile, r.stdout, Encoding.UTF8);
                 }
                 return r.code;
@@ -446,12 +647,13 @@ namespace DeployKeyGitClient
             var sbOut = new StringBuilder();
             var sbErr = new StringBuilder();
 
-            using var proc = new Process { StartInfo = psi, EnableRaisingEvents = true };
+            var proc = new Process { StartInfo = psi, EnableRaisingEvents = true };
             proc.OutputDataReceived += (s, e) => { if (e.Data != null) { sbOut.AppendLine(e.Data); log?.Invoke(e.Data); } };
             proc.ErrorDataReceived += (s, e) => { if (e.Data != null) { sbErr.AppendLine(e.Data); log?.Invoke("ERR: " + e.Data); } };
 
             try
             {
+                lock (_procLock) { _currentProcess = proc; }
                 if (!proc.Start()) throw new Exception("Failed to start: " + file);
                 proc.BeginOutputReadLine();
                 proc.BeginErrorReadLine();
@@ -467,6 +669,10 @@ namespace DeployKeyGitClient
             {
                 log?.Invoke("RunProcessWithStdinAsync error: " + ex.Message);
                 return (-1, sbOut.ToString(), sbErr.ToString() + Environment.NewLine + ex.Message);
+            }
+            finally
+            {
+                try { lock (_procLock) { proc?.Dispose(); _currentProcess = null; } } catch { }
             }
         }
 
