@@ -1,0 +1,14 @@
+C:\Users\Jiro\Desktop\DeployKeyGitClient\bin\Debug\net8.0-windows\DeployKeyGitClient.exe
+C:\Users\Jiro\Desktop\DeployKeyGitClient\bin\Debug\net8.0-windows\DeployKeyGitClient.deps.json
+C:\Users\Jiro\Desktop\DeployKeyGitClient\bin\Debug\net8.0-windows\DeployKeyGitClient.runtimeconfig.json
+C:\Users\Jiro\Desktop\DeployKeyGitClient\bin\Debug\net8.0-windows\DeployKeyGitClient.dll
+C:\Users\Jiro\Desktop\DeployKeyGitClient\bin\Debug\net8.0-windows\DeployKeyGitClient.pdb
+C:\Users\Jiro\Desktop\DeployKeyGitClient\obj\Debug\net8.0-windows\DeployKeyGitClient.GeneratedMSBuildEditorConfig.editorconfig
+C:\Users\Jiro\Desktop\DeployKeyGitClient\obj\Debug\net8.0-windows\DeployKeyGitClient.AssemblyInfoInputs.cache
+C:\Users\Jiro\Desktop\DeployKeyGitClient\obj\Debug\net8.0-windows\DeployKeyGitClient.AssemblyInfo.cs
+C:\Users\Jiro\Desktop\DeployKeyGitClient\obj\Debug\net8.0-windows\DeployKeyGitClient.csproj.CoreCompileInputs.cache
+C:\Users\Jiro\Desktop\DeployKeyGitClient\obj\Debug\net8.0-windows\DeployKeyGitClient.dll
+C:\Users\Jiro\Desktop\DeployKeyGitClient\obj\Debug\net8.0-windows\refint\DeployKeyGitClient.dll
+C:\Users\Jiro\Desktop\DeployKeyGitClient\obj\Debug\net8.0-windows\DeployKeyGitClient.pdb
+C:\Users\Jiro\Desktop\DeployKeyGitClient\obj\Debug\net8.0-windows\DeployKeyGitClient.genruntimeconfig.cache
+C:\Users\Jiro\Desktop\DeployKeyGitClient\obj\Debug\net8.0-windows\ref\DeployKeyGitClient.dll
