@@ -5,8 +5,10 @@
     <UseWindowsForms>true</UseWindowsForms>
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
+    <Company>USSBD</Company>
 
     <AssemblyName>DeployKeyGitClient</AssemblyName>
     <RootNamespace>DeployKeyGitClient</RootNamespace>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
   </PropertyGroup>
 </Project>

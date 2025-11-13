@@ -442,6 +442,265 @@ namespace DeployKeyGitClient
             }
         }
 
+        // place in AppLogic class (make async Task)
+        public static async Task<bool> CreateVirtualHostAsync(string domain, string projectPublicPath, Action<string> log)
+        {
+            try
+            {
+                if (string.IsNullOrWhiteSpace(domain)) { log("Domain required."); return false; }
+                if (string.IsNullOrWhiteSpace(projectPublicPath) || !Directory.Exists(projectPublicPath))
+                {
+                    log("Project public folder not found: " + projectPublicPath);
+                    return false;
+                }
+
+                // Simple validation for domain
+                var domainPattern = @"^[a-zA-Z0-9\-\.]{3,253}$";
+                if (!Regex.IsMatch(domain, domainPattern))
+                {
+                    log("Domain looks invalid.");
+                    return false;
+                }
+
+                // Try to detect XAMPP apache conf location
+                var defaultXampp = Path.Combine("C:", "xampp");
+                string apacheRoot = null!;
+                if (Directory.Exists(defaultXampp) && Directory.Exists(Path.Combine(defaultXampp, "apache")))
+                {
+                    apacheRoot = Path.Combine(defaultXampp, "apache");
+                }
+                else
+                {
+                    // fallback: try to find httpd.exe near typical locations
+                    var candidates = new[]
+                    {
+                        Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), "xampp", "apache"),
+                        Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFilesX86), "xampp", "apache")
+                    };
+                    apacheRoot = candidates.FirstOrDefault(d => d != null && Directory.Exists(d)) ?? null;
+                }
+
+                if (apacheRoot == null)
+                {
+                    log("Could not auto-detect XAMPP Apache installation under C:\\xampp or Program Files. Please set XAMPP path or create vhost manually.");
+                    return false;
+                }
+
+                var vhostsFile = Path.Combine(apacheRoot, "conf", "extra", "httpd-vhosts.conf");
+                var backupVhosts = vhostsFile + ".bak." + DateTime.Now.ToString("yyyyMMddHHmmss");
+                File.Copy(vhostsFile, backupVhosts, true);
+                log($"Backed up vhosts to {backupVhosts}");
+
+                // Build vhost block
+                var docRoot = projectPublicPath.Replace('\\', '/');
+                var vhostBlock = $@"
+        <VirtualHost *:80>
+            ServerName {domain}
+            ServerAlias www.{domain}
+            DocumentRoot ""{docRoot}""
+            <Directory ""{docRoot}"">
+                Options Indexes FollowSymLinks
+                AllowOverride All
+                Require all granted
+            </Directory>
+            ErrorLog ""logs/{domain}-error.log""
+            CustomLog ""logs/{domain}-access.log"" common
+        </VirtualHost>
+
+        ";
+
+                // Append only if not present
+                var vhostsText = File.ReadAllText(vhostsFile);
+                if (vhostsText.Contains($"ServerName {domain}", StringComparison.OrdinalIgnoreCase))
+                {
+                    log($"Vhost for {domain} already exists in {vhostsFile}");
+                }
+                else
+                {
+                    File.AppendAllText(vhostsFile, Environment.NewLine + vhostBlock, Encoding.UTF8);
+                    log($"Appended vhost for {domain} to {vhostsFile}");
+                }
+
+                // Hosts file update
+                var hostsFile = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.System), "drivers\\etc\\hosts");
+                var hostsBackup = hostsFile + ".bak." + DateTime.Now.ToString("yyyyMMddHHmmss");
+                File.Copy(hostsFile, hostsBackup, true);
+                log($"Backed up hosts to {hostsBackup}");
+
+                var hostsText = File.ReadAllText(hostsFile);
+                var entry = $"127.0.0.1    {domain}";
+                if (!hostsText.Contains(domain, StringComparison.OrdinalIgnoreCase))
+                {
+                    // Append at end
+                    File.AppendAllText(hostsFile, Environment.NewLine + entry + Environment.NewLine, Encoding.UTF8);
+                    log($"Added hosts entry: {entry}");
+                }
+                else log($"Hosts already contains {domain}");
+
+                // Try restart Apache using httpd.exe
+                var httpdExe = Path.Combine(apacheRoot, "bin", "httpd.exe");
+                if (File.Exists(httpdExe))
+                {
+                    var r = await RunProcessCaptureAsync(httpdExe, "-k restart", null, apacheRoot, log);
+                    log($"httpd restart exit {r.code}");
+                    if (r.code == 0) return true;
+                }
+
+                // Fallback: try service stop/start name Apache2.4 (may vary)
+                var stop = await RunProcessCaptureAsync("net", "stop Apache2.4", null, null, log);
+                log($"net stop exit {stop.code}");
+                var start = await RunProcessCaptureAsync("net", "start Apache2.4", null, null, log);
+                log($"net start exit {start.code}");
+
+                // final check: try to curl domain locally
+                var test = await RunProcessCaptureAsync("ping", domain, null, null, log);
+                log($"ping exit {test.code}");
+
+                return true;
+            }
+            catch (UnauthorizedAccessException ua)
+            {
+                log("Permission error: must run application as Administrator. " + ua.Message);
+                return false;
+            }
+            catch (Exception ex)
+            {
+                log("CreateVirtualHostAsync error: " + ex.Message);
+                return false;
+            }
+        }
+
+        public static async Task<bool> RemoveVirtualHostAsync(string domain, Action<string> log)
+        {
+            try
+            {
+                if (string.IsNullOrWhiteSpace(domain)) { log("Domain required."); return false; }
+
+                // Detect apache root (same detection used elsewhere)
+                var defaultXampp = Path.Combine("C:", "xampp");
+                string apacheRoot = null!;
+                if (Directory.Exists(defaultXampp) && Directory.Exists(Path.Combine(defaultXampp, "apache")))
+                    apacheRoot = Path.Combine(defaultXampp, "apache");
+                else
+                {
+                    var candidates = new[]
+                    {
+                        Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), "xampp", "apache"),
+                        Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFilesX86), "xampp", "apache")
+                    };
+                    apacheRoot = candidates.FirstOrDefault(d => d != null && Directory.Exists(d)) ?? null;
+                }
+
+                if (apacheRoot == null)
+                {
+                    log("Could not auto-detect Apache root (C:\\xampp expected). Aborting.");
+                    return false;
+                }
+
+                var extra = Path.Combine(apacheRoot, "conf", "extra");
+                var vhostsFile = Path.Combine(extra, "httpd-vhosts.conf");
+                if (!File.Exists(vhostsFile))
+                {
+                    log("httpd-vhosts.conf not found: " + vhostsFile);
+                    return false;
+                }
+
+                // backup current vhosts before modifying
+                var backup = vhostsFile + ".pre_remove." + DateTime.Now.ToString("yyyyMMddHHmmss");
+                File.Copy(vhostsFile, backup, true);
+                log($"Backup of vhosts saved to: {backup}");
+
+                var text = File.ReadAllText(vhostsFile, Encoding.UTF8);
+                // Remove any VirtualHost block that contains ServerName <domain>
+                string pattern = $@"<VirtualHost\b.*?>.*?ServerName\s+{Regex.Escape(domain)}.*?</VirtualHost>";
+                var newText = Regex.Replace(text, pattern, "", RegexOptions.Singleline | RegexOptions.IgnoreCase);
+
+                // Also remove any blocks where ServerAlias contains the domain
+                string patternAlias = $@"<VirtualHost\b.*?>.*?ServerAlias\b.*?{Regex.Escape(domain)}.*?</VirtualHost>";
+                newText = Regex.Replace(newText, patternAlias, "", RegexOptions.Singleline | RegexOptions.IgnoreCase);
+
+                if (newText == text)
+                {
+                    log("No vhost blocks found for domain in httpd-vhosts.conf.");
+                }
+                else
+                {
+                    File.WriteAllText(vhostsFile, newText, Encoding.UTF8);
+                    log("Removed vhost blocks for domain from httpd-vhosts.conf.");
+                }
+
+                // Remove cert/key files under conf/ssl/<domain>.* if present
+                var sslDir = Path.Combine(apacheRoot, "conf", "ssl");
+                if (Directory.Exists(sslDir))
+                {
+                    var crt = Path.Combine(sslDir, $"{domain}.crt");
+                    var key = Path.Combine(sslDir, $"{domain}.key");
+                    if (File.Exists(crt))
+                    {
+                        try { File.Delete(crt); log($"Deleted cert: {crt}"); } catch (Exception ex) { log("Failed deleting cert: " + ex.Message); }
+                    }
+                    if (File.Exists(key))
+                    {
+                        try { File.Delete(key); log($"Deleted key: {key}"); } catch (Exception ex) { log("Failed deleting key: " + ex.Message); }
+                    }
+
+                    // remove any files that start with domain (safety)
+                    foreach (var f in Directory.GetFiles(sslDir, domain + ".*"))
+                    {
+                        try { File.Delete(f); log($"Deleted SSL file: {f}"); } catch (Exception ex) { log("Failed deleting SSL file: " + ex.Message); }
+                    }
+                }
+                else
+                {
+                    log("SSL folder not found (skipping cert removal).");
+                }
+
+                // Remove hosts entry
+                var hostsFile = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.System), "drivers\\etc\\hosts");
+                if (File.Exists(hostsFile))
+                {
+                    var hostsText = File.ReadAllText(hostsFile, Encoding.UTF8);
+                    var lines = hostsText.Split(new[] { "\r\n", "\n" }, StringSplitOptions.None).ToList();
+                    var beforeCount = lines.Count;
+                    lines = lines.Where(l => !Regex.IsMatch(l, $@"^\s*127\.0\.0\.1\s+.*\b{Regex.Escape(domain)}\b", RegexOptions.IgnoreCase)).ToList();
+                    if (lines.Count < beforeCount)
+                    {
+                        // backup hosts
+                        var hostsBackup = hostsFile + ".bak." + DateTime.Now.ToString("yyyyMMddHHmmss");
+                        File.Copy(hostsFile, hostsBackup, true);
+                        File.WriteAllText(hostsFile, string.Join(Environment.NewLine, lines), Encoding.UTF8);
+                        log($"Removed hosts entries for {domain}. Backup saved to {hostsBackup}");
+                    }
+                    else log($"No hosts entry found for {domain} in hosts file.");
+                }
+                else log("Hosts file not found: " + hostsFile);
+
+                // Restart Apache to apply changes
+                var httpdExe = Path.Combine(apacheRoot, "bin", "httpd.exe");
+                if (File.Exists(httpdExe))
+                {
+                    var r = await RunProcessCaptureAsync(httpdExe, "-k restart", null, apacheRoot, log);
+                    log($"httpd restart exit {r.code}");
+                }
+                else
+                {
+                    log("httpd.exe not found; please restart Apache manually via XAMPP Control Panel.");
+                }
+
+                return true;
+            }
+            catch (UnauthorizedAccessException ua)
+            {
+                log("Permission error: must run application as Administrator. " + ua.Message);
+                return false;
+            }
+            catch (Exception ex)
+            {
+                log("RemoveVirtualHostAsync error: " + ex.Message);
+                return false;
+            }
+        }
+
         // For convenience: a helper that applies ProcessorId into Backoffice controller (existing)
         public static async Task<bool> ApplyProcessorIdToBackofficeControllerAsync(string projectRoot, Action<string> log)
         {

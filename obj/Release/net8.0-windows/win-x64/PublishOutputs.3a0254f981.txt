@@ -1,0 +1,2 @@
+C:\Users\Jiro\Desktop\DeployKeyGitClient\publish\win-x64-self\DeployKeyGitClient.pdb
+C:\Users\Jiro\Desktop\DeployKeyGitClient\publish\win-x64-self\DeployKeyGitClient.exe

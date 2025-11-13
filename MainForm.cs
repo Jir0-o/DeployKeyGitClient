@@ -1,9 +1,9 @@
+// Replace your MainForm.cs with this file
 using System;
 using System.Diagnostics;
 using System.IO;
 using System.Linq;
 using System.Net;
-using System.Security.Principal;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.RegularExpressions;
@@ -26,6 +26,8 @@ namespace DeployKeyGitClient
         private Button btnPull = null!;
         private TextBox txtLog = null!;
         private ProgressBar progressBar = null!;
+
+        private Button btnRemoveVHost = null!;
 
         // New: key path selector separate from project folder
         private TextBox txtKeyFolder = null!;
@@ -76,11 +78,22 @@ namespace DeployKeyGitClient
         private Process? _currentProcess;
         private readonly object _procLock = new object();
 
+        // layout containers
+        private SplitContainer splitMain = null!;
+        private Panel leftPanel = null!;
+        private Panel rightPanel = null!;
+        private TableLayoutPanel leftTable = null!;
+        private FlowLayoutPanel rightFlow = null!;
+
+        // Log group panel reference (so we can resize correctly)
+        private Panel grpLogPanel = null!;
+
         public MainForm()
         {
             Text = "Deploy-Key Git Client";
-            Width = 1140;
-            Height = 1020;
+            Width = 1200;
+            Height = 920;
+            StartPosition = FormStartPosition.CenterScreen;
             InitUi();
 
             // Load saved inputs (SettingsManager)
@@ -103,210 +116,278 @@ namespace DeployKeyGitClient
                 if (s.TryGetValue("FunctionName", out v)) txtFunctionName.Text = v;
                 if (s.TryGetValue("PublicKey", out v)) { txtPublicKey.Text = v; _publicSsh = v; }
                 if (s.TryGetValue("PrivateKey", out v)) { _privatePem = v; }
-
             }
             catch { /* ignore */ }
         }
 
         private void InitUi()
         {
-            var pad = 8;
-            var left = pad;
-            var y = pad;
+            // top-level split: left = controls, right = workspace (public key + log)
+            splitMain = new SplitContainer
+            {
+                Dock = DockStyle.Fill,
+                Orientation = Orientation.Vertical,
+                // left slightly larger than previously
+                SplitterDistance = 760,
+                IsSplitterFixed = false,
+                BorderStyle = BorderStyle.FixedSingle
+            };
+            Controls.Add(splitMain);
 
-            // Repo folder, git url
-            Controls.Add(new Label { Text = "Install/Repo folder:", Left = left, Top = y + 6, Width = 140 });
-            txtInstallFolder = new TextBox { Left = 160, Top = y, Width = 640 };
-            Controls.Add(txtInstallFolder);
-            btnBrowse = new Button { Text = "Browse...", Left = 810, Top = y, Width = 120 };
+            // Left panel: scrollable controls column
+            leftPanel = new Panel { Dock = DockStyle.Fill, AutoScroll = true };
+            splitMain.Panel1.Controls.Add(leftPanel);
+
+            // Right panel: public key editor + logs
+            rightPanel = new Panel { Dock = DockStyle.Fill };
+            splitMain.Panel2.Controls.Add(rightPanel);
+
+            // Build left column as a TableLayout to group controls
+            leftTable = new TableLayoutPanel
+            {
+                Dock = DockStyle.Top,
+                AutoSize = true,
+                ColumnCount = 1,
+                Padding = new Padding(8),
+                CellBorderStyle = TableLayoutPanelCellBorderStyle.None
+            };
+            leftPanel.Controls.Add(leftTable);
+
+            // Group 1: Repo & Git
+            var grpRepo = CreateGroupPanel("Repository");
+            var repoTbl = new TableLayoutPanel { Dock = DockStyle.Top, AutoSize = true, ColumnCount = 3 };
+            repoTbl.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 75));
+            repoTbl.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 96));
+            repoTbl.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 80));
+            repoTbl.RowCount = 3;
+
+            // Install/Repo folder row (with Browse)
+            var lblInstall = new Label { Text = "Install/Repo folder:", Anchor = AnchorStyles.Left, AutoSize = true };
+            txtInstallFolder = new TextBox { Anchor = AnchorStyles.Left | AnchorStyles.Right, Width = 360 };
+            btnBrowse = new Button { Text = "Browse...", Width = 72 };
             btnBrowse.Click += BtnBrowse_Click;
-            Controls.Add(btnBrowse);
 
-            y += 36;
-            Controls.Add(new Label { Text = "Git repo URL (HTTPS or SSH):", Left = left, Top = y + 6, Width = 200 });
-            txtGitUrl = new TextBox { Left = 210, Top = y, Width = 740 };
-            Controls.Add(txtGitUrl);
+            repoTbl.Controls.Add(lblInstall, 0, 0);
+            repoTbl.Controls.Add(txtInstallFolder, 0, 1);
+            repoTbl.SetColumnSpan(txtInstallFolder, 2);
+            repoTbl.Controls.Add(btnBrowse, 2, 1);
 
-            y += 36;
-            // Key generation + separate key folder controls
-            btnGenerate = new Button { Text = "Generate Deploy Key", Left = left, Top = y, Width = 180 };
+            // Git URL
+            var lblGit = new Label { Text = "Git repo URL (HTTPS or SSH):", Anchor = AnchorStyles.Left, AutoSize = true };
+            txtGitUrl = new TextBox { Anchor = AnchorStyles.Left | AnchorStyles.Right, Width = 460 };
+            repoTbl.Controls.Add(lblGit, 0, 2);
+            repoTbl.Controls.Add(txtGitUrl, 0, 3);
+            repoTbl.SetColumnSpan(txtGitUrl, 3);
+
+            // Key generation + buttons
+            var keyRow = new FlowLayoutPanel { Dock = DockStyle.Top, AutoSize = true, FlowDirection = FlowDirection.LeftToRight };
+            btnGenerate = new Button { Text = "Generate Deploy Key", AutoSize = true };
             btnGenerate.Click += BtnGenerate_Click;
-            Controls.Add(btnGenerate);
-
-            btnSaveKeys = new Button { Text = "Save Keys (to key folder)", Left = left + 190, Top = y, Width = 160 };
+            btnSaveKeys = new Button { Text = "Save Keys (to key folder)", AutoSize = true };
             btnSaveKeys.Click += BtnSaveKeys_Click;
-            Controls.Add(btnSaveKeys);
-
-            btnCopy = new Button { Text = "Copy Public Key", Left = left + 360, Top = y, Width = 120 };
+            btnCopy = new Button { Text = "Copy Public Key", AutoSize = true };
             btnCopy.Click += BtnCopy_Click;
-            Controls.Add(btnCopy);
-
-            btnCancelOp = new Button { Text = "Cancel Operation", Left = left + 490, Top = y, Width = 140 };
+            btnCancelOp = new Button { Text = "Cancel Operation", AutoSize = true };
             btnCancelOp.Click += BtnCancelOp_Click;
-            Controls.Add(btnCancelOp);
+            keyRow.Controls.Add(btnGenerate);
+            keyRow.Controls.Add(btnSaveKeys);
+            keyRow.Controls.Add(btnCopy);
+            keyRow.Controls.Add(btnCancelOp);
 
-            // Key folder selector (new)
-            Controls.Add(new Label { Text = "Key folder (separate):", Left = left + 650, Top = y + 6, Width = 120 });
-            txtKeyFolder = new TextBox { Left = left + 770, Top = y, Width = 240 };
-            Controls.Add(txtKeyFolder);
-            btnBrowseKeyFolder = new Button { Text = "Browse", Left = left + 1018, Top = y, Width = 80 };
+            // Key folder row and load/save buttons
+            var keyFolderRow = new FlowLayoutPanel { Dock = DockStyle.Top, AutoSize = true, FlowDirection = FlowDirection.LeftToRight };
+            keyFolderRow.Controls.Add(new Label { Text = "Key folder (separate):", AutoSize = true, Padding = new Padding(0, 6, 0, 0) });
+            txtKeyFolder = new TextBox { Width = 300 };
+            btnBrowseKeyFolder = new Button { Text = "Browse", AutoSize = true };
             btnBrowseKeyFolder.Click += BtnBrowseKeyFolder_Click;
-            Controls.Add(btnBrowseKeyFolder);
-
-            y += 40;
-            Controls.Add(new Label { Text = "Public deploy key (editable) - edit then Save to write files:", Left = left, Top = y + 6, Width = 420 });
-            y += 20;
-            // Public key is editable now so user can tweak before saving
-            txtPublicKey = new TextBox { Left = left, Top = y, Width = 1080, Height = 110, Multiline = true, ScrollBars = ScrollBars.Vertical };
-            Controls.Add(txtPublicKey);
-
-            // load existing key button + save text to files
-            y += 116;
-            btnLoadKey = new Button { Text = "Load Key from key folder", Left = left, Top = y, Width = 200 };
+            btnLoadKey = new Button { Text = "Load Key from key folder", AutoSize = true };
             btnLoadKey.Click += BtnLoadKey_Click;
-            Controls.Add(btnLoadKey);
-
-            btnSaveKeyFromText = new Button { Text = "Save Key Text to key folder", Left = left + 210, Top = y, Width = 220 };
+            btnSaveKeyFromText = new Button { Text = "Save Key Text to key folder", AutoSize = true };
             btnSaveKeyFromText.Click += BtnSaveKeyFromText_Click;
-            Controls.Add(btnSaveKeyFromText);
+            keyFolderRow.Controls.Add(txtKeyFolder);
+            keyFolderRow.Controls.Add(btnBrowseKeyFolder);
+            keyFolderRow.Controls.Add(btnLoadKey);
+            keyFolderRow.Controls.Add(btnSaveKeyFromText);
 
-            // Clone/Pull controls
-            y += 44;
-            btnClone = new Button { Text = "Clone to folder (temp -> move)", Left = left, Top = y, Width = 260 };
+            // Add repo group items
+            grpRepo.Controls.Add(repoTbl);
+            grpRepo.Controls.Add(keyRow);
+            grpRepo.Controls.Add(keyFolderRow);
+            leftTable.Controls.Add(grpRepo);
+
+            // More groups (Git ops, DB, Composer, VHost, etc.) - keep layout compact
+            var grpGitOps = CreateGroupPanel("Git operations");
+            var gitOpsFlow = new FlowLayoutPanel { Dock = DockStyle.Top, AutoSize = true, FlowDirection = FlowDirection.LeftToRight };
+            btnClone = new Button { Text = "Clone to folder (temp -> move)", AutoSize = true };
             btnClone.Click += BtnClone_Click;
-            Controls.Add(btnClone);
-
-            btnPull = new Button { Text = "Pull / Update", Left = left + 270, Top = y, Width = 160 };
+            btnPull = new Button { Text = "Pull / Update", AutoSize = true };
             btnPull.Click += BtnPull_Click;
-            Controls.Add(btnPull);
+            progressBar = new ProgressBar { Width = 200, Height = 22, Anchor = AnchorStyles.Left };
+            gitOpsFlow.Controls.Add(btnClone);
+            gitOpsFlow.Controls.Add(btnPull);
+            gitOpsFlow.Controls.Add(progressBar);
+            grpGitOps.Controls.Add(gitOpsFlow);
+            leftTable.Controls.Add(grpGitOps);
 
-            progressBar = new ProgressBar { Left = left + 440, Top = y + 6, Width = 720, Height = 24 };
-            Controls.Add(progressBar);
+            var grpDb = CreateGroupPanel("Local DB / SQL (XAMPP)");
+            var dbTbl = new TableLayoutPanel { Dock = DockStyle.Top, AutoSize = true, ColumnCount = 6 };
+            dbTbl.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 40));
+            dbTbl.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 120));
+            dbTbl.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 60));
+            dbTbl.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 160));
+            dbTbl.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 120));
+            dbTbl.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+            dbTbl.RowCount = 2;
+            dbTbl.Controls.Add(new Label { Text = "Host:", AutoSize = true, Anchor = AnchorStyles.Left }, 0, 0);
+            txtDbHost = new TextBox { Text = "127.0.0.1", Width = 110 };
+            dbTbl.Controls.Add(txtDbHost, 1, 0);
+            dbTbl.Controls.Add(new Label { Text = "Port:", AutoSize = true, Anchor = AnchorStyles.Left }, 2, 0);
+            txtDbPort = new TextBox { Text = "3306", Width = 50 };
+            dbTbl.Controls.Add(txtDbPort, 3, 0);
+            dbTbl.Controls.Add(new Label { Text = "DB:", AutoSize = true, Anchor = AnchorStyles.Left }, 4, 0);
+            txtDbName = new TextBox { Text = "laravel", Width = 120 };
+            dbTbl.Controls.Add(txtDbName, 5, 0);
+            dbTbl.Controls.Add(new Label { Text = "User:", AutoSize = true, Anchor = AnchorStyles.Left }, 0, 1);
+            txtDbUser = new TextBox { Text = "root", Width = 110 };
+            dbTbl.Controls.Add(txtDbUser, 1, 1);
+            dbTbl.Controls.Add(new Label { Text = "Pass:", AutoSize = true, Anchor = AnchorStyles.Left }, 2, 1);
+            txtDbPass = new TextBox { Width = 160, UseSystemPasswordChar = true };
+            dbTbl.Controls.Add(txtDbPass, 3, 1);
+            dbTbl.SetColumnSpan(txtDbPass, 3);
 
-            // --- Database controls ---
-            y += 44;
-            Controls.Add(new Label { Text = "Local DB / SQL (XAMPP)", Left = left, Top = y + 6, Width = 200 });
-
-            y += 28;
-            Controls.Add(new Label { Text = "Host:", Left = left, Top = y + 6, Width = 40 });
-            txtDbHost = new TextBox { Left = left + 40, Top = y, Width = 120, Text = "127.0.0.1" };
-            Controls.Add(txtDbHost);
-
-            Controls.Add(new Label { Text = "Port:", Left = left + 180, Top = y + 6, Width = 40 });
-            txtDbPort = new TextBox { Left = left + 220, Top = y, Width = 60, Text = "3306" };
-            Controls.Add(txtDbPort);
-
-            Controls.Add(new Label { Text = "DB:", Left = left + 300, Top = y + 6, Width = 30 });
-            txtDbName = new TextBox { Left = left + 330, Top = y, Width = 160, Text = "laravel" };
-            Controls.Add(txtDbName);
-
-            Controls.Add(new Label { Text = "User:", Left = left + 500, Top = y + 6, Width = 40 });
-            txtDbUser = new TextBox { Left = left + 540, Top = y, Width = 120, Text = "root" };
-            Controls.Add(txtDbUser);
-
-            Controls.Add(new Label { Text = "Pass:", Left = left + 680, Top = y + 6, Width = 40 });
-            txtDbPass = new TextBox { Left = left + 720, Top = y, Width = 160, Text = "", UseSystemPasswordChar = true };
-            Controls.Add(txtDbPass);
-
-            y += 36;
-            btnSelectSql = new Button { Text = "Select SQL File", Left = left, Top = y, Width = 140 };
+            var sqlRow = new FlowLayoutPanel { Dock = DockStyle.Top, AutoSize = true };
+            btnSelectSql = new Button { Text = "Select SQL File", AutoSize = true };
             btnSelectSql.Click += BtnSelectSql_Click;
-            Controls.Add(btnSelectSql);
-
-            txtSqlPath = new TextBox { Left = left + 150, Top = y, Width = 700, ReadOnly = true };
-            Controls.Add(txtSqlPath);
-
-            btnExecSql = new Button { Text = "Execute SQL", Left = left + 860, Top = y, Width = 120 };
+            txtSqlPath = new TextBox { Width = 460, ReadOnly = true };
+            btnExecSql = new Button { Text = "Execute SQL", AutoSize = true };
             btnExecSql.Click += BtnExecSql_Click;
-            Controls.Add(btnExecSql);
+            sqlRow.Controls.Add(btnSelectSql);
+            sqlRow.Controls.Add(txtSqlPath);
+            sqlRow.Controls.Add(btnExecSql);
 
-            // Composer and migrate
-            y += 44;
-            btnComposerInstall = new Button { Text = "Composer Install (auto-update)", Left = left, Top = y, Width = 260 };
+            grpDb.Controls.Add(dbTbl);
+            grpDb.Controls.Add(sqlRow);
+            leftTable.Controls.Add(grpDb);
+
+            var grpComposer = CreateGroupPanel("Composer & Artisan");
+            var composerFlow = new FlowLayoutPanel { Dock = DockStyle.Top, AutoSize = true };
+            btnComposerInstall = new Button { Text = "Composer Install (auto-update)", AutoSize = true };
             btnComposerInstall.Click += BtnComposerInstall_Click;
-            Controls.Add(btnComposerInstall);
-
-            btnMigrate = new Button { Text = "Run php artisan migrate", Left = left + 290, Top = y, Width = 240 };
+            btnMigrate = new Button { Text = "Run php artisan migrate", AutoSize = true };
             btnMigrate.Click += BtnMigrate_Click;
-            Controls.Add(btnMigrate);
-
-            btnEnablePhpZip = new Button { Text = "Enable PHP zip extension", Left = left + 550, Top = y, Width = 220 };
+            btnEnablePhpZip = new Button { Text = "Enable PHP zip extension", AutoSize = true };
             btnEnablePhpZip.Click += BtnEnablePhpZip_Click;
-            Controls.Add(btnEnablePhpZip);
+            composerFlow.Controls.Add(btnComposerInstall);
+            composerFlow.Controls.Add(btnMigrate);
+            composerFlow.Controls.Add(btnEnablePhpZip);
+            grpComposer.Controls.Add(composerFlow);
+            leftTable.Controls.Add(grpComposer);
 
-            // Virtual host
-            y += 44;
-            Controls.Add(new Label { Text = "Create local virtual host (requires admin)", Left = left, Top = y + 6, Width = 360 });
-
-            txtVHostDomain = new TextBox { Left = left + 360, Top = y, Width = 320, Text = "myproject.local" };
-            Controls.Add(txtVHostDomain);
-
-            btnCreateVHost = new Button { Text = "Create Virtual Host", Left = left + 690, Top = y, Width = 200 };
+            var grpVhost = CreateGroupPanel("Virtual Host");
+            var vhostRow = new FlowLayoutPanel { Dock = DockStyle.Top, AutoSize = true };
+            vhostRow.Controls.Add(new Label { Text = "Domain:", AutoSize = true, Padding = new Padding(6, 8, 0, 0) });
+            txtVHostDomain = new TextBox { Width = 220, Text = "myproject.local" };
+            btnCreateVHost = new Button { Text = "Create Virtual Host", AutoSize = true };
             btnCreateVHost.Click += BtnCreateVHost_Click;
-            Controls.Add(btnCreateVHost);
+            btnRemoveVHost = new Button { Text = "Remove vHost (undo)", AutoSize = true };
+            btnRemoveVHost.Click += BtnRemoveVHost_Click;
+            vhostRow.Controls.Add(txtVHostDomain);
+            vhostRow.Controls.Add(btnCreateVHost);
+            vhostRow.Controls.Add(btnRemoveVHost);
+            grpVhost.Controls.Add(vhostRow);
+            leftTable.Controls.Add(grpVhost);
 
-            // Register / API / Skip-worktree
-            y += 44;
-            btnRegisterDevice = new Button { Text = "Register Device (Backoffice)", Left = left, Top = y, Width = 260 };
+            var grpApi = CreateGroupPanel("Backoffice / API / Skip-worktree");
+            var apiRow = new FlowLayoutPanel { Dock = DockStyle.Top, AutoSize = true, FlowDirection = FlowDirection.LeftToRight };
+            btnRegisterDevice = new Button { Text = "Register Device (Backoffice)", AutoSize = true };
             btnRegisterDevice.Click += BtnRegisterDevice_Click;
-            Controls.Add(btnRegisterDevice);
-
-            Controls.Add(new Label { Text = "API URL to apply (OrderController):", Left = left + 280, Top = y + 6, Width = 220 });
-            txtApiUrl = new TextBox { Left = left + 510, Top = y, Width = 420, Text = "https://api.example.com/sync" };
-            Controls.Add(txtApiUrl);
-
-            btnApplyApiUrl = new Button { Text = "Apply API URL", Left = left + 940, Top = y, Width = 120 };
+            apiRow.Controls.Add(btnRegisterDevice);
+            apiRow.Controls.Add(new Label { Text = "API URL to apply (OrderController):", AutoSize = true, Padding = new Padding(10, 8, 0, 0) });
+            txtApiUrl = new TextBox { Width = 340, Text = "https://api.example.com/sync" };
+            btnApplyApiUrl = new Button { Text = "Apply API URL", AutoSize = true };
             btnApplyApiUrl.Click += BtnApplyApiUrl_Click;
-            Controls.Add(btnApplyApiUrl);
+            apiRow.Controls.Add(txtApiUrl);
+            apiRow.Controls.Add(btnApplyApiUrl);
+            grpApi.Controls.Add(apiRow);
 
-            y += 36;
-            Controls.Add(new Label { Text = "Path to protect (git skip-worktree):", Left = left, Top = y + 6, Width = 220 });
-            txtSkipPath = new TextBox { Left = left + 240, Top = y, Width = 640, Text = "app/Http/Controllers/Sales/OrderController.php" };
-            Controls.Add(txtSkipPath);
-            btnToggleSkipWorktree = new Button { Text = "Toggle Skip-Worktree", Left = left + 900, Top = y, Width = 160 };
+            var skipRow = new FlowLayoutPanel { Dock = DockStyle.Top, AutoSize = true };
+            skipRow.Controls.Add(new Label { Text = "Path to protect (git skip-worktree):", AutoSize = true, Padding = new Padding(0, 8, 0, 0) });
+            txtSkipPath = new TextBox { Width = 420, Text = "app/Http/Controllers/Sales/OrderController.php" };
+            btnToggleSkipWorktree = new Button { Text = "Toggle Skip-Worktree", AutoSize = true };
             btnToggleSkipWorktree.Click += BtnToggleSkipWorktree_Click;
-            Controls.Add(btnToggleSkipWorktree);
+            skipRow.Controls.Add(txtSkipPath);
+            skipRow.Controls.Add(btnToggleSkipWorktree);
+            grpApi.Controls.Add(skipRow);
 
-            // DB backup + env
-            y += 44;
-            btnBackupDb = new Button { Text = "Backup Database", Left = left, Top = y, Width = 260 };
+            leftTable.Controls.Add(grpApi);
+
+            var grpDbOps = CreateGroupPanel("DB Tools");
+            var dbOpsFlow = new FlowLayoutPanel { Dock = DockStyle.Top, AutoSize = true };
+            btnBackupDb = new Button { Text = "Backup Database", AutoSize = true };
             btnBackupDb.Click += BtnBackupDb_Click;
-            Controls.Add(btnBackupDb);
-
-            btnGenerateEnv = new Button { Text = "Generate .env File", Left = left + 270, Top = y, Width = 240 };
+            btnGenerateEnv = new Button { Text = "Generate .env File", AutoSize = true };
             btnGenerateEnv.Click += BtnGenerateEnv_Click;
-            Controls.Add(btnGenerateEnv);
+            dbOpsFlow.Controls.Add(btnBackupDb);
+            dbOpsFlow.Controls.Add(btnGenerateEnv);
+            grpDbOps.Controls.Add(dbOpsFlow);
+            leftTable.Controls.Add(grpDbOps);
 
-            // --- Protect single function UI ---
-            y += 44;
-            Controls.Add(new Label { Text = "Protect single function workflow (function-level):", Left = left, Top = y + 6, Width = 380 });
+            var grpProtect = CreateGroupPanel("Protect single function workflow (function-level)");
+            var protectTbl = new TableLayoutPanel { Dock = DockStyle.Top, AutoSize = true, ColumnCount = 3 };
+            protectTbl.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 140));
+            protectTbl.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 70));
+            protectTbl.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 30));
+            protectTbl.RowCount = 2;
+            protectTbl.Controls.Add(new Label { Text = "Controller relative path:", AutoSize = true }, 0, 0);
+            txtControllerRelPath = new TextBox { Width = 360, Text = "app/Http/Controllers/BackofficeLoginController.php" };
+            protectTbl.Controls.Add(txtControllerRelPath, 1, 0);
+            protectTbl.Controls.Add(new Label { Text = "Function name:", AutoSize = true }, 0, 1);
+            txtFunctionName = new TextBox { Width = 160, Text = "check" };
+            protectTbl.Controls.Add(txtFunctionName, 1, 1);
 
-            y += 28;
-            Controls.Add(new Label { Text = "Controller relative path:", Left = left, Top = y + 6, Width = 140 });
-            txtControllerRelPath = new TextBox { Left = left + 150, Top = y, Width = 560, Text = "app/Http/Controllers/BackofficeLoginController.php" };
-            Controls.Add(txtControllerRelPath);
-
-            Controls.Add(new Label { Text = "Function name:", Left = left + 720, Top = y + 6, Width = 90 });
-            txtFunctionName = new TextBox { Left = left + 810, Top = y, Width = 160, Text = "check" };
-            Controls.Add(txtFunctionName);
-
-            y += 36;
-            btnProtectFunction = new Button { Text = "Save/Protect Function (store local body)", Left = left, Top = y, Width = 300 };
+            var protectFlow = new FlowLayoutPanel { Dock = DockStyle.Top, AutoSize = true };
+            btnProtectFunction = new Button { Text = "Save/Protect Function (store local body)", AutoSize = true };
             btnProtectFunction.Click += BtnProtectFunction_Click;
-            Controls.Add(btnProtectFunction);
-
-            btnReapplyProtected = new Button { Text = "Reapply All Protected Functions", Left = left + 310, Top = y, Width = 260 };
+            btnReapplyProtected = new Button { Text = "Reapply All Protected Functions", AutoSize = true };
             btnReapplyProtected.Click += BtnReapplyProtected_Click;
-            Controls.Add(btnReapplyProtected);
-
-            btnMarkFileSkipWorktree = new Button { Text = "Mark file skip-worktree (file-level)", Left = left + 580, Top = y, Width = 240 };
+            btnMarkFileSkipWorktree = new Button { Text = "Mark file skip-worktree (file-level)", AutoSize = true };
             btnMarkFileSkipWorktree.Click += BtnMarkFileSkipWorktree_Click;
-            Controls.Add(btnMarkFileSkipWorktree);
+            protectFlow.Controls.Add(btnProtectFunction);
+            protectFlow.Controls.Add(btnReapplyProtected);
+            protectFlow.Controls.Add(btnMarkFileSkipWorktree);
 
-            // --- Log area ---
-            y += 60;
-            txtLog = new TextBox { Left = left, Top = y, Width = 1080, Height = 260, Multiline = true, ScrollBars = ScrollBars.Both, ReadOnly = true };
-            Controls.Add(txtLog);
+            grpProtect.Controls.Add(protectTbl);
+            grpProtect.Controls.Add(protectFlow);
+            leftTable.Controls.Add(grpProtect);
+
+            // Right side: public key editor and logs
+            rightFlow = new FlowLayoutPanel { Dock = DockStyle.Fill, FlowDirection = FlowDirection.TopDown, AutoScroll = true, WrapContents = false, Padding = new Padding(8) };
+            rightPanel.Controls.Add(rightFlow);
+
+            var lblPublicKey = new Label { Text = "Public deploy key (editable) - edit then Save to write files", AutoSize = true };
+            txtPublicKey = new TextBox { Multiline = true, ScrollBars = ScrollBars.Vertical, Width = Math.Max(400, splitMain.Panel2.ClientSize.Width - 40), Height = 280, Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right };
+            var pkButtons = new FlowLayoutPanel { AutoSize = true, FlowDirection = FlowDirection.LeftToRight };
+            var btnLoad = new Button { Text = "Load Key from key folder", AutoSize = true };
+            btnLoad.Click += BtnLoadKey_Click;
+            var btnSaveText = new Button { Text = "Save Key Text to key folder", AutoSize = true };
+            btnSaveText.Click += BtnSaveKeyFromText_Click;
+            pkButtons.Controls.Add(btnLoad);
+            pkButtons.Controls.Add(btnSaveText);
+            rightFlow.Controls.Add(lblPublicKey);
+            rightFlow.Controls.Add(txtPublicKey);
+            rightFlow.Controls.Add(pkButtons);
+
+            // Log area - dock and visible
+            grpLogPanel = CreateGroupPanel("Log");
+            // make log group fixed-size so FlowLayout will show it properly
+            grpLogPanel.Height = 320;
+            grpLogPanel.AutoSize = false;
+            // set initial width to match right panel
+            grpLogPanel.Width = Math.Max(360, splitMain.Panel2.ClientSize.Width - 40);
+
+            txtLog = new TextBox { Multiline = true, ScrollBars = ScrollBars.Both, ReadOnly = true, Dock = DockStyle.Fill, Height = 300 };
+            grpLogPanel.Controls.Add(txtLog);
+            rightFlow.Controls.Add(grpLogPanel);
 
             // Persist inputs as user types
             txtInstallFolder.TextChanged += (s, e) => SettingsManager.Save("InstallFolder", txtInstallFolder.Text);
@@ -323,10 +404,40 @@ namespace DeployKeyGitClient
             txtVHostDomain.TextChanged += (s, e) => SettingsManager.Save("VHostDomain", txtVHostDomain.Text);
             txtControllerRelPath.TextChanged += (s, e) => SettingsManager.Save("ControllerRelPath", txtControllerRelPath.Text);
             txtFunctionName.TextChanged += (s, e) => SettingsManager.Save("FunctionName", txtFunctionName.Text);
+
+            // handle resizing to keep right textbox and log width responsive
+            splitMain.Panel2.Resize += (s, e) =>
+            {
+                // update public key width
+                txtPublicKey.Width = Math.Max(400, splitMain.Panel2.ClientSize.Width - 40);
+
+                // update log group width and inner textbox width
+                if (grpLogPanel != null)
+                {
+                    grpLogPanel.Width = Math.Max(360, splitMain.Panel2.ClientSize.Width - 40);
+                    // ensure the internal txtLog receives proper width as it's Dock=Fill inside grpLogPanel
+                    txtLog.Width = Math.Max(200, grpLogPanel.ClientSize.Width - 16);
+                }
+            };
+        }
+
+        private Panel CreateGroupPanel(string title)
+        {
+            var pnl = new Panel
+            {
+                Dock = DockStyle.Top,
+                AutoSize = true,
+                Padding = new Padding(6),
+                BorderStyle = BorderStyle.FixedSingle
+            };
+            var lbl = new Label { Text = title, Dock = DockStyle.Top, Font = new System.Drawing.Font(Font.FontFamily, 9.0f, System.Drawing.FontStyle.Bold), Height = 20 };
+            pnl.Controls.Add(lbl);
+            return pnl;
         }
 
         private void Log(string line)
         {
+            if (txtLog == null) return;
             if (txtLog.InvokeRequired) txtLog.Invoke(new Action(() => { txtLog.AppendText($"[{DateTime.Now:HH:mm:ss}] {line}{Environment.NewLine}"); }));
             else txtLog.AppendText($"[{DateTime.Now:HH:mm:ss}] {line}{Environment.NewLine}");
         }
@@ -339,13 +450,12 @@ namespace DeployKeyGitClient
             if (dlg.ShowDialog() == DialogResult.OK) txtKeyFolder.Text = dlg.SelectedPath;
         }
 
-
+        // Install/Repo browse fixes: opens folder browser and writes into txtInstallFolder
         private void BtnBrowse_Click(object? sender, EventArgs e)
         {
             using var dlg = new FolderBrowserDialog { Description = "Select folder to hold the repository" };
             if (dlg.ShowDialog() == DialogResult.OK) txtInstallFolder.Text = dlg.SelectedPath;
         }
-
 
         private void BtnGenerate_Click(object? sender, EventArgs e)
         {
@@ -363,7 +473,7 @@ namespace DeployKeyGitClient
             }
             catch (Exception ex)
             {
-                Log("Key generation failed: " + ex.Message);
+                Log(ex.ToString());
                 MessageBox.Show("Key generation failed: " + ex.Message);
             }
         }
@@ -405,7 +515,8 @@ namespace DeployKeyGitClient
             }
             catch (Exception ex)
             {
-                Log("Load key error: " + ex.Message);
+                Log(ex.ToString());
+                MessageBox.Show("Load key error: " + ex.Message);
             }
         }
 
@@ -463,7 +574,7 @@ namespace DeployKeyGitClient
             }
             catch (Exception ex)
             {
-                Log("Save key error: " + ex.Message);
+                Log(ex.ToString());
                 MessageBox.Show("Save key error: " + ex.Message);
             }
         }
@@ -540,7 +651,7 @@ namespace DeployKeyGitClient
             }
             catch (Exception ex)
             {
-                Log("Clone error: " + ex.Message);
+                Log(ex.ToString());
                 MessageBox.Show("Clone error: " + ex.Message);
             }
         }
@@ -569,7 +680,7 @@ namespace DeployKeyGitClient
             }
             catch (Exception ex)
             {
-                Log("Pull error: " + ex.Message);
+                Log(ex.ToString());
                 MessageBox.Show("Pull error: " + ex.Message);
             }
         }
@@ -589,23 +700,23 @@ namespace DeployKeyGitClient
 
         private async void BtnExecSql_Click(object? sender, EventArgs e)
         {
-            var sqlPath = txtSqlPath.Text?.Trim();
-            if (string.IsNullOrEmpty(sqlPath) || !File.Exists(sqlPath))
-            {
-                MessageBox.Show("Select a SQL file first.");
-                return;
-            }
-            var db = new AppLogic.DbInfo
-            {
-                Host = txtDbHost.Text.Trim(),
-                Port = txtDbPort.Text.Trim(),
-                Database = txtDbName.Text.Trim(),
-                User = txtDbUser.Text.Trim(),
-                Password = txtDbPass.Text
-            };
-
             try
             {
+                var sqlPath = txtSqlPath.Text?.Trim();
+                if (string.IsNullOrEmpty(sqlPath) || !File.Exists(sqlPath))
+                {
+                    MessageBox.Show("Select a SQL file first.");
+                    return;
+                }
+                var db = new AppLogic.DbInfo
+                {
+                    Host = txtDbHost.Text.Trim(),
+                    Port = txtDbPort.Text.Trim(),
+                    Database = txtDbName.Text.Trim(),
+                    User = txtDbUser.Text.Trim(),
+                    Password = txtDbPass.Text
+                };
+
                 progressBar.Value = 0;
                 Log($"Importing SQL: {sqlPath}");
                 var ok = await AppLogic.ImportSqlFileAsync(sqlPath, db, Log);
@@ -614,7 +725,7 @@ namespace DeployKeyGitClient
             }
             catch (Exception ex)
             {
-                Log("SQL exec error: " + ex.Message);
+                Log(ex.ToString());
                 MessageBox.Show("SQL exec error: " + ex.Message);
             }
         }
@@ -637,7 +748,8 @@ namespace DeployKeyGitClient
             }
             catch (Exception ex)
             {
-                Log("Backup error: " + ex.Message);
+                Log(ex.ToString());
+                MessageBox.Show("Backup error: " + ex.Message);
             }
         }
 
@@ -658,7 +770,8 @@ namespace DeployKeyGitClient
             }
             catch (Exception ex)
             {
-                Log(".env generation failed: " + ex.Message);
+                Log(ex.ToString());
+                MessageBox.Show(".env generation failed: " + ex.Message);
             }
         }
 
@@ -671,7 +784,8 @@ namespace DeployKeyGitClient
             }
             catch (Exception ex)
             {
-                Log("Composer error: " + ex.Message);
+                Log(ex.ToString());
+                MessageBox.Show("Composer error: " + ex.Message);
             }
         }
 
@@ -684,19 +798,53 @@ namespace DeployKeyGitClient
             }
             catch (Exception ex)
             {
-                Log("Migrate error: " + ex.Message);
+                Log(ex.ToString());
+                MessageBox.Show("Migrate error: " + ex.Message);
             }
         }
 
-        // Enable PHP zip - delegate to AppLogic (not shown here)
         private void BtnEnablePhpZip_Click(object? sender, EventArgs e)
         {
             MessageBox.Show("Use AppLogic.EnablePhpZip (admin required). This UI placeholder avoids duplicate code. See logs.");
         }
 
-        private void BtnCreateVHost_Click(object? sender, EventArgs e)
+        private async void BtnCreateVHost_Click(object? sender, EventArgs e)
         {
-            MessageBox.Show("Use AppLogic.CreateVirtualHost (admin required). This UI placeholder avoids duplicate code. See logs.");
+            try
+            {
+                var domain = txtVHostDomain.Text?.Trim();
+                if (string.IsNullOrEmpty(domain)) { MessageBox.Show("Enter domain (e.g. shoe.com)"); return; }
+                var projectRoot = txtInstallFolder.Text?.Trim();
+                if (string.IsNullOrEmpty(projectRoot) || !Directory.Exists(projectRoot)) { MessageBox.Show("Select project folder."); return; }
+                var publicPath = Path.Combine(projectRoot, "public");
+                var ok = await AppLogic.CreateVirtualHostAsync(domain, publicPath, Log);
+                MessageBox.Show(ok ? "Virtual host created (check logs). Make sure app is run as Administrator." : "Failed. See log.");
+            }
+            catch (Exception ex)
+            {
+                Log(ex.ToString());
+                MessageBox.Show("Create VHost error: " + ex.Message);
+            }
+        }
+
+        private async void BtnRemoveVHost_Click(object? sender, EventArgs e)
+        {
+            try
+            {
+                var domain = txtVHostDomain.Text?.Trim();
+                if (string.IsNullOrEmpty(domain)) { MessageBox.Show("Enter domain to remove (e.g. myproject.local)"); return; }
+
+                var confirm = MessageBox.Show($"This will attempt to remove vhost, hosts entry and certs for '{domain}'. Continue?", "Confirm remove", MessageBoxButtons.YesNo, MessageBoxIcon.Warning);
+                if (confirm != DialogResult.Yes) return;
+
+                var ok = await AppLogic.RemoveVirtualHostAsync(domain, Log);
+                MessageBox.Show(ok ? "Remove process finished (check logs)." : "Remove failed (check logs).");
+            }
+            catch (Exception ex)
+            {
+                Log(ex.ToString());
+                MessageBox.Show("Remove vHost error: " + ex.Message);
+            }
         }
 
         private async void BtnRegisterDevice_Click(object? sender, EventArgs e)
@@ -708,7 +856,8 @@ namespace DeployKeyGitClient
             }
             catch (Exception ex)
             {
-                Log("Register device error: " + ex.Message);
+                Log(ex.ToString());
+                MessageBox.Show("Register device error: " + ex.Message);
             }
         }
 
@@ -739,7 +888,8 @@ namespace DeployKeyGitClient
             }
             catch (Exception ex)
             {
-                Log("Apply API URL error: " + ex.Message);
+                Log(ex.ToString());
+                MessageBox.Show("Apply API URL error: " + ex.Message);
             }
         }
 
@@ -752,7 +902,8 @@ namespace DeployKeyGitClient
             }
             catch (Exception ex)
             {
-                Log("Toggle skip-worktree error: " + ex.Message);
+                Log(ex.ToString());
+                MessageBox.Show("Toggle skip-worktree error: " + ex.Message);
             }
         }
 
@@ -777,7 +928,8 @@ namespace DeployKeyGitClient
             }
             catch (Exception ex)
             {
-                Log("Protect function error: " + ex.Message);
+                Log(ex.ToString());
+                MessageBox.Show("Protect function error: " + ex.Message);
             }
         }
 
@@ -796,7 +948,8 @@ namespace DeployKeyGitClient
             }
             catch (Exception ex)
             {
-                Log("Reapply protected error: " + ex.Message);
+                Log(ex.ToString());
+                MessageBox.Show("Reapply protected error: " + ex.Message);
             }
         }
 
@@ -817,7 +970,8 @@ namespace DeployKeyGitClient
             }
             catch (Exception ex)
             {
-                Log("Mark skip-worktree error: " + ex.Message);
+                Log(ex.ToString());
+                MessageBox.Show("Mark skip-worktree error: " + ex.Message);
             }
         }
 
