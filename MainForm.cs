@@ -9,6 +9,7 @@ using System.Text;
 using System.Text.RegularExpressions;
 using System.Threading.Tasks;
 using System.Windows.Forms;
+using System.Drawing;
 
 namespace DeployKeyGitClient
 {
@@ -26,9 +27,6 @@ namespace DeployKeyGitClient
         private Button btnPull = null!;
         private TextBox txtLog = null!;
         private ProgressBar progressBar = null!;
-
-        private System.Windows.Forms.Timer _autoPullTimer = null!;
-        private bool _autoPullRunning = false;
 
         private Button btnRemoveVHost = null!;
 
@@ -237,10 +235,6 @@ namespace DeployKeyGitClient
                 Log("Startup credential check error: " + ex.Message);
             }
 
-            _autoPullTimer = new System.Windows.Forms.Timer();
-            _autoPullTimer.Interval = 60 * 60 * 1000; // 1 hour
-            _autoPullTimer.Tick += async (s, e) => await AutoPullTickAsync();
-            _autoPullTimer.Start();
         }
 
         private void InitUi()
@@ -573,7 +567,7 @@ namespace DeployKeyGitClient
                 }
             };
 
-            // Lock on minimize
+            // Minimize to tray and lock
             this.Resize += (s, e) =>
             {
                 try
@@ -581,11 +575,13 @@ namespace DeployKeyGitClient
                     if (this.WindowState == FormWindowState.Minimized)
                     {
                         _isLocked = true;
-                        Log("Application minimized - will require unlock on restore.");
+                        Log("Application minimized to tray - will require unlock on restore.");
+                        this.Hide();
                     }
                 }
                 catch { }
             };
+
 
             // Optional: lock on deactivation (commented; enable if you want extra strict)
             this.Deactivate += (s, e) =>
@@ -817,53 +813,6 @@ namespace DeployKeyGitClient
             {
                 AppLogic.KillCurrentProcess();
                 Log("Requested cancel of running child process.");
-            }
-        }
-
-        private async Task AutoPullTickAsync()
-        {
-            if (_autoPullRunning) return; // safety: no overlapping runs
-            _autoPullRunning = true;
-
-            try
-            {
-                var targetFolder = txtInstallFolder.Text?.Trim();
-                if (string.IsNullOrEmpty(targetFolder) || !Directory.Exists(targetFolder))
-                {
-                    Log("Auto-pull skipped: Install/Repo folder not set or does not exist.");
-                    return;
-                }
-
-                // choose private key from key folder if not already set
-                if (string.IsNullOrEmpty(_privateKeyPath) && !string.IsNullOrEmpty(txtKeyFolder.Text))
-                {
-                    var candidate = Path.Combine(txtKeyFolder.Text, ".ssh", "deploy_key");
-                    if (File.Exists(candidate)) _privateKeyPath = candidate;
-                }
-
-                Log("Auto-pull tick: checking for remote updates...");
-                try { progressBar.Value = 0; } catch { }
-
-                await AppLogic.PullUpdateAsync(
-                    targetFolder,
-                    v =>
-                    {
-                        try { progressBar.Value = v; } catch { }
-                    },
-                    Log,
-                    _privateKeyPath
-                );
-
-                Log("Auto-pull tick finished.");
-                try { progressBar.Value = 100; } catch { }
-            }
-            catch (Exception ex)
-            {
-                Log("Auto-pull tick error: " + ex.Message);
-            }
-            finally
-            {
-                _autoPullRunning = false;
             }
         }
 

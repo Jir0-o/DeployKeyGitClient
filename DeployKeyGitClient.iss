@@ -14,7 +14,11 @@ Uninstallable=yes
 CloseApplications=yes
 
 [Files]
+; Main admin app
 Source: "publish\win-x64\DeployKeyGitClient.exe"; DestDir: "{app}"; Flags: ignoreversion
+; Background agent (non-admin)
+Source: "publish\win-x64\DeployKeyGitClientAgent.exe"; DestDir: "{app}"; Flags: ignoreversion
+; Other files
 Source: "publish\win-x64\*"; DestDir: "{app}"; Flags: recursesubdirs createallsubdirs
 
 [Icons]
@@ -24,11 +28,12 @@ Name: "{commondesktop}\DeployKeyGitClient"; Filename: "{app}\DeployKeyGitClient.
 [Tasks]
 Name: desktopicon; Description: "Create a &desktop icon"; Flags: unchecked
 
-; IMPORTANT: machine-wide startup, visible in Task Manager → Startup
+; Startup entry: only the AGENT runs on boot
 [Registry]
 Root: HKLM; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; \
-    ValueType: string; ValueName: "DeployKeyGitClient"; \
-    ValueData: """{app}\DeployKeyGitClient.exe"""; Flags: uninsdeletevalue
+    ValueType: string; ValueName: "DeployKeyGitClientAgent"; \
+    ValueData: """{app}\DeployKeyGitClientAgent.exe"""; Flags: uninsdeletevalue
 
 [Run]
+; After install, launch main app once (admin) if you want:
 Filename: "{app}\DeployKeyGitClient.exe"; Description: "Launch DeployKeyGitClient"; Flags: shellexec postinstall; Verb: runas

@@ -11,4 +11,10 @@
     <RootNamespace>DeployKeyGitClient</RootNamespace>
     <ApplicationManifest>app.manifest</ApplicationManifest>
   </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Remove="DeployKeyGitClientAgent\**\*.cs" />
+    <EmbeddedResource Remove="DeployKeyGitClientAgent\**\*.resx" />
+    <None Remove="DeployKeyGitClientAgent\**\*" />
+  </ItemGroup>
 </Project>

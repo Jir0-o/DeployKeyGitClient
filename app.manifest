@@ -2,7 +2,7 @@
 <assembly xmlns="urn:schemas-microsoft-com:asm.v1" manifestVersion="1.0">
   <assemblyIdentity version="1.0.0.0" name="DeployKeyGitClient.app" />
 
-  <!-- RequestAdministrator forces UAC elevation at process start -->
+  <!-- Run as normal user; no UAC prompt at startup -->
   <trustInfo xmlns="urn:schemas-microsoft-com:asm.v3">
     <security>
       <requestedPrivileges>
