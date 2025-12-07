@@ -7,7 +7,7 @@ namespace DeployKeyGitClient
     public class LockForm : Form
     {
         private readonly Func<string, bool> _verify;
-        private Label lbl;
+        private Label lbl = null!;
         private TextBox txt;
         private Button btnOk;
         private Button btnCancel;

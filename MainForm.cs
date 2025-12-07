@@ -28,6 +28,16 @@ namespace DeployKeyGitClient
         private TextBox txtLog = null!;
         private ProgressBar progressBar = null!;
 
+        private TextBox txtGitBranch = null!;
+        private Button btnClearLog = null!;
+        private TextBox txtCustomCmd = null!;
+        private Button btnRunCmd = null!;
+
+        private TextBox txtLicenseApiUrl = null!;
+        private TextBox txtDefaultLicenseId = null!;
+        private Button btnApplyLicense = null!;
+
+
         private Button btnRemoveVHost = null!;
 
         // New: key path selector separate from project folder
@@ -53,6 +63,7 @@ namespace DeployKeyGitClient
         private Button btnCreateVHost = null!;
 
         private Button btnEnablePhpZip = null!;
+        private Button btnEnablePhpGd = null!;
         private Button btnCancelOp = null!;
 
         private Button btnRegisterDevice = null!;
@@ -62,6 +73,8 @@ namespace DeployKeyGitClient
         private Button btnToggleSkipWorktree = null!;
         private Button btnBackupDb = null!;
         private Button btnGenerateEnv = null!;
+
+        private Button btnResetSkipWorktree = null!;
 
         // Protect single function UI
         private TextBox txtControllerRelPath = null!;
@@ -123,6 +136,10 @@ namespace DeployKeyGitClient
                 if (s.TryGetValue("FunctionName", out v)) txtFunctionName.Text = v;
                 if (s.TryGetValue("PublicKey", out v)) { txtPublicKey.Text = v; _publicSsh = v; }
                 if (s.TryGetValue("PrivateKey", out v)) { _privatePem = v; }
+                if (s.TryGetValue("GitBranch", out v)) txtGitBranch.Text = v;
+
+                if (s.TryGetValue("LicenseApiUrl", out v)) txtLicenseApiUrl.Text = v;
+                if (s.TryGetValue("DefaultLicenseIdentifier", out v)) txtDefaultLicenseId.Text = v;
             }
             catch { /* ignore */ }
 
@@ -295,6 +312,13 @@ namespace DeployKeyGitClient
             repoTbl.Controls.Add(txtGitUrl, 0, 3);
             repoTbl.SetColumnSpan(txtGitUrl, 3);
 
+            // Git branch
+            var lblBranch = new Label { Text = "Git branch (optional):", Anchor = AnchorStyles.Left, AutoSize = true };
+            txtGitBranch = new TextBox { Anchor = AnchorStyles.Left | AnchorStyles.Right, Width = 200, Text = "master" }; // or "main"
+            repoTbl.Controls.Add(lblBranch, 0, 4);
+            repoTbl.Controls.Add(txtGitBranch, 0, 5);
+            repoTbl.SetColumnSpan(txtGitBranch, 3);
+
             // Key generation + buttons
             var keyRow = new FlowLayoutPanel { Dock = DockStyle.Top, AutoSize = true, FlowDirection = FlowDirection.LeftToRight };
             btnGenerate = new Button { Text = "Generate Deploy Key", AutoSize = true };
@@ -345,6 +369,51 @@ namespace DeployKeyGitClient
             grpGitOps.Controls.Add(gitOpsFlow);
             leftTable.Controls.Add(grpGitOps);
 
+            // Custom command group (runs in project root)
+            var grpCmd = CreateGroupPanel("Custom Command (project root)");
+            var cmdFlow = new FlowLayoutPanel
+            {
+                Dock = DockStyle.Top,
+                AutoSize = true,
+                FlowDirection = FlowDirection.LeftToRight,
+                WrapContents = false
+            };
+
+            cmdFlow.Controls.Add(new Label
+            {
+                Text = "Command:",
+                AutoSize = true,
+                Padding = new Padding(0, 6, 0, 0)
+            });
+
+            txtCustomCmd = new TextBox
+            {
+                Width = 400
+            };
+
+            btnRunCmd = new Button
+            {
+                Text = "Run",
+                AutoSize = true
+            };
+            btnRunCmd.Click += BtnRunCmd_Click;
+
+            // Press Enter in the textbox to run
+            txtCustomCmd.KeyDown += (s, e) =>
+            {
+                if (e.KeyCode == Keys.Enter)
+                {
+                    e.SuppressKeyPress = true;
+                    BtnRunCmd_Click(s, e);
+                }
+            };
+
+            cmdFlow.Controls.Add(txtCustomCmd);
+            cmdFlow.Controls.Add(btnRunCmd);
+            grpCmd.Controls.Add(cmdFlow);
+            leftTable.Controls.Add(grpCmd);
+
+
             // Group: DB / SQL
             var grpDb = CreateGroupPanel("Local DB / SQL (XAMPP)");
             var dbTbl = new TableLayoutPanel { Dock = DockStyle.Top, AutoSize = true, ColumnCount = 6 };
@@ -389,17 +458,28 @@ namespace DeployKeyGitClient
             // Group: Composer & Artisan
             var grpComposer = CreateGroupPanel("Composer & Artisan");
             var composerFlow = new FlowLayoutPanel { Dock = DockStyle.Top, AutoSize = true };
+
             btnComposerInstall = new Button { Text = "Composer Install (auto-update)", AutoSize = true };
             btnComposerInstall.Click += BtnComposerInstall_Click;
+
             btnMigrate = new Button { Text = "Run php artisan migrate", AutoSize = true };
             btnMigrate.Click += BtnMigrate_Click;
+
             btnEnablePhpZip = new Button { Text = "Enable PHP zip extension", AutoSize = true };
             btnEnablePhpZip.Click += BtnEnablePhpZip_Click;
+
+            // NEW: gd button
+            btnEnablePhpGd = new Button { Text = "Enable PHP gd extension", AutoSize = true };
+            btnEnablePhpGd.Click += BtnEnablePhpGd_Click;
+
             composerFlow.Controls.Add(btnComposerInstall);
             composerFlow.Controls.Add(btnMigrate);
             composerFlow.Controls.Add(btnEnablePhpZip);
+            composerFlow.Controls.Add(btnEnablePhpGd);
+
             grpComposer.Controls.Add(composerFlow);
             leftTable.Controls.Add(grpComposer);
+
 
             // Group: Virtual Host
             var grpVhost = CreateGroupPanel("Virtual Host");
@@ -435,9 +515,21 @@ namespace DeployKeyGitClient
             txtSkipPath = new TextBox { Width = 420, Text = "app/Http/Controllers/Sales/OrderController.php" };
             btnToggleSkipWorktree = new Button { Text = "Toggle Skip-Worktree", AutoSize = true };
             btnToggleSkipWorktree.Click += BtnToggleSkipWorktree_Click;
+
+            // NEW reset button
+            btnResetSkipWorktree = new Button
+            {
+                Text = "Reset all Skip-Worktree",
+                AutoSize = true
+            };
+            btnResetSkipWorktree.Click += BtnResetSkipWorktree_Click;
+
             skipRow.Controls.Add(txtSkipPath);
             skipRow.Controls.Add(btnToggleSkipWorktree);
+            skipRow.Controls.Add(btnResetSkipWorktree);  
+
             grpApi.Controls.Add(skipRow);
+
 
             leftTable.Controls.Add(grpApi);
 
@@ -452,6 +544,71 @@ namespace DeployKeyGitClient
             dbOpsFlow.Controls.Add(btnGenerateEnv);
             grpDbOps.Controls.Add(dbOpsFlow);
             leftTable.Controls.Add(grpDbOps);
+
+            // Group: License Settings (.env)
+            var grpLicense = CreateGroupPanel("License Settings (.env)");
+
+            var licTbl = new TableLayoutPanel
+            {
+                Dock = DockStyle.Top,
+                AutoSize = true,
+                ColumnCount = 2
+            };
+            licTbl.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 200)); // label column
+            licTbl.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100)); // input column
+
+            // LICENSE_API_URL
+            licTbl.Controls.Add(new Label
+            {
+                Text = "LICENSE_API_URL:",
+                AutoSize = true,
+                Anchor = AnchorStyles.Left
+            }, 0, 0);
+
+            txtLicenseApiUrl = new TextBox
+            {
+                Width = 360,
+                Anchor = AnchorStyles.Left | AnchorStyles.Right
+            };
+            licTbl.Controls.Add(txtLicenseApiUrl, 1, 0);
+
+            // DEFAULT_LICENSE_IDENTIFIER
+            licTbl.Controls.Add(new Label
+            {
+                Text = "DEFAULT_LICENSE_IDENTIFIER:",
+                AutoSize = true,
+                Anchor = AnchorStyles.Left
+            }, 0, 1);
+
+            txtDefaultLicenseId = new TextBox
+            {
+                Width = 360,
+                Anchor = AnchorStyles.Left | AnchorStyles.Right
+            };
+            licTbl.Controls.Add(txtDefaultLicenseId, 1, 1);
+
+            // Apply button
+            var licFlow = new FlowLayoutPanel
+            {
+                Dock = DockStyle.Top,
+                AutoSize = true,
+                FlowDirection = FlowDirection.LeftToRight
+            };
+
+            btnApplyLicense = new Button
+            {
+                Text = "Apply License to .env",
+                AutoSize = true
+            };
+            btnApplyLicense.Click += BtnApplyLicense_Click;
+
+            licFlow.Controls.Add(btnApplyLicense);
+
+            grpLicense.Controls.Add(licTbl);
+            grpLicense.Controls.Add(licFlow);
+
+            leftTable.Controls.Add(grpLicense);
+
 
             // Group: Protect single function
             var grpProtect = CreateGroupPanel("Protect single function workflow (function-level)");
@@ -528,16 +685,43 @@ namespace DeployKeyGitClient
             grpLogPanel.AutoSize = false;
             grpLogPanel.Width = Math.Max(360, splitMain.Panel2.ClientSize.Width - 40);
 
+            // Layout inside Log panel
+            var logLayout = new TableLayoutPanel
+            {
+                Dock = DockStyle.Fill,
+                ColumnCount = 1,
+                RowCount = 2
+            };
+            logLayout.RowStyles.Add(new RowStyle(SizeType.AutoSize));   // buttons row
+            logLayout.RowStyles.Add(new RowStyle(SizeType.Percent, 100)); // log textbox row
+
+            // Clear log button
+            btnClearLog = new Button
+            {
+                Text = "Clear Log",
+                AutoSize = true,
+                Anchor = AnchorStyles.Left
+            };
+            btnClearLog.Click += (s, e) => txtLog.Clear();
+
+            // Log textbox
             txtLog = new TextBox
             {
                 Multiline = true,
-                ScrollBars = ScrollBars.Both,
                 ReadOnly = true,
-                Dock = DockStyle.Fill,
-                Height = 300
+                ScrollBars = ScrollBars.Both,
+                Dock = DockStyle.Fill
             };
-            grpLogPanel.Controls.Add(txtLog);
-            rightFlow.Controls.Add(grpLogPanel);
+
+            // Add controls
+            logLayout.Controls.Add(btnClearLog, 0, 0);
+            logLayout.Controls.Add(txtLog, 0, 1);
+
+            grpLogPanel.Controls.Add(logLayout);
+            rightFlow.Controls.Add(grpLogPanel); 
+            // ❌ this line is wrong for your current layout
+            // splitMain.Panel2.Controls.Add(grpLogPanel);
+
 
             // Persist inputs as user types
             txtInstallFolder.TextChanged += (s, e) => SettingsManager.Save("InstallFolder", txtInstallFolder.Text);
@@ -548,12 +732,15 @@ namespace DeployKeyGitClient
             txtDbName.TextChanged += (s, e) => SettingsManager.Save("DbName", txtDbName.Text);
             txtDbUser.TextChanged += (s, e) => SettingsManager.Save("DbUser", txtDbUser.Text);
             txtDbPass.TextChanged += (s, e) => SettingsManager.Save("DbPass", txtDbPass.Text);
+            txtLicenseApiUrl.TextChanged += (s, e) => SettingsManager.Save("LicenseApiUrl", txtLicenseApiUrl.Text);
+            txtDefaultLicenseId.TextChanged += (s, e) => SettingsManager.Save("DefaultLicenseIdentifier", txtDefaultLicenseId.Text);
             txtSqlPath.TextChanged += (s, e) => SettingsManager.Save("SqlPath", txtSqlPath.Text);
             txtApiUrl.TextChanged += (s, e) => SettingsManager.Save("ApiUrl", txtApiUrl.Text);
             txtSkipPath.TextChanged += (s, e) => SettingsManager.Save("SkipPath", txtSkipPath.Text);
             txtVHostDomain.TextChanged += (s, e) => SettingsManager.Save("VHostDomain", txtVHostDomain.Text);
             txtControllerRelPath.TextChanged += (s, e) => SettingsManager.Save("ControllerRelPath", txtControllerRelPath.Text);
             txtFunctionName.TextChanged += (s, e) => SettingsManager.Save("FunctionName", txtFunctionName.Text);
+            txtGitBranch.TextChanged += (s, e) => SettingsManager.Save("GitBranch", txtGitBranch.Text);
 
             // handle resizing to keep right textbox and log width responsive
             splitMain.Panel2.Resize += (s, e) =>
@@ -823,17 +1010,14 @@ namespace DeployKeyGitClient
             try
             {
                 var gitUrl = txtGitUrl.Text?.Trim();
-                if (string.IsNullOrEmpty(gitUrl))
-                {
-                    MessageBox.Show("Enter the repository URL.");
-                    return;
-                }
+                if (string.IsNullOrEmpty(gitUrl)) { MessageBox.Show("Enter the repository URL."); return; }
 
                 if (string.IsNullOrEmpty(txtKeyFolder.Text?.Trim()) && string.IsNullOrEmpty(_privateKeyPath))
                 {
                     MessageBox.Show("Either save a private key to Key folder or set private key path.");
                 }
 
+                // Choose privateKeyPath from key folder if available
                 if (string.IsNullOrEmpty(_privateKeyPath) && !string.IsNullOrEmpty(txtKeyFolder.Text) && Directory.Exists(txtKeyFolder.Text))
                 {
                     var candidate = Path.Combine(txtKeyFolder.Text, ".ssh", "deploy_key");
@@ -847,33 +1031,21 @@ namespace DeployKeyGitClient
                 }
 
                 var targetFolder = txtInstallFolder.Text?.Trim();
-                if (string.IsNullOrEmpty(targetFolder))
-                {
-                    MessageBox.Show("Select target folder.");
-                    return;
-                }
+                if (string.IsNullOrEmpty(targetFolder)) { MessageBox.Show("Select target folder."); return; }
 
                 if (Directory.Exists(targetFolder) && Directory.EnumerateFileSystemEntries(targetFolder).Any())
                 {
                     var confirm = MessageBox.Show(
                         $"Folder '{targetFolder}' is not empty.\n\nThis application will DELETE ALL CONTENTS of the folder before moving the cloned project into it.\n\nProceed?",
                         "Confirm overwrite and clone",
-                        MessageBoxButtons.YesNo,
-                        MessageBoxIcon.Warning);
-
-                    if (confirm != DialogResult.Yes)
-                    {
-                        Log("User cancelled clone into non-empty folder.");
-                        return;
-                    }
+                        MessageBoxButtons.YesNo, MessageBoxIcon.Warning);
+                    if (confirm != DialogResult.Yes) { Log("User cancelled clone into non-empty folder."); return; }
                 }
-                else
-                {
-                    Directory.CreateDirectory(targetFolder);
-                }
+                else Directory.CreateDirectory(targetFolder);
 
+                var branch = txtGitBranch.Text?.Trim();
                 progressBar.Value = 0;
-                await AppLogic.CloneIntoTempThenMoveAsync(gitUrl, targetFolder, v => progressBar.Value = v, Log, _privateKeyPath);
+                await AppLogic.CloneIntoTempThenMoveAsync(gitUrl, targetFolder, v => progressBar.Value = v, Log, _privateKeyPath, branch);
                 MessageBox.Show("Clone succeeded and files moved to target folder.");
             }
             catch (Exception ex)
@@ -894,14 +1066,16 @@ namespace DeployKeyGitClient
                     return;
                 }
 
+                // choose key from key folder if not set
                 if (string.IsNullOrEmpty(_privateKeyPath) && !string.IsNullOrEmpty(txtKeyFolder.Text))
                 {
                     var candidate = Path.Combine(txtKeyFolder.Text, ".ssh", "deploy_key");
                     if (File.Exists(candidate)) _privateKeyPath = candidate;
                 }
 
+                var branch = txtGitBranch.Text?.Trim();
                 progressBar.Value = 0;
-                await AppLogic.PullUpdateAsync(targetFolder, v => progressBar.Value = v, Log, _privateKeyPath);
+                await AppLogic.PullUpdateAsync(targetFolder, v => progressBar.Value = v, Log, _privateKeyPath, branch);
                 MessageBox.Show("Update finished. Check log for details.");
             }
             catch (Exception ex)
@@ -910,6 +1084,113 @@ namespace DeployKeyGitClient
                 MessageBox.Show("Pull error: " + ex.Message);
             }
         }
+
+        private async void BtnRunCmd_Click(object? sender, EventArgs e)
+        {
+            try
+            {
+                var projectRoot = txtInstallFolder.Text?.Trim();
+                if (string.IsNullOrEmpty(projectRoot) || !Directory.Exists(projectRoot))
+                {
+                    MessageBox.Show("Select project folder (clone target) first.");
+                    return;
+                }
+
+                var cmd = txtCustomCmd.Text?.Trim();
+                if (string.IsNullOrEmpty(cmd))
+                {
+                    MessageBox.Show("Enter a command to run.");
+                    return;
+                }
+
+                // Echo the command into the log like a shell
+                Log($"> {cmd}");
+
+                await AppLogic.RunCustomCommandAsync(projectRoot, cmd, Log);
+            }
+            catch (Exception ex)
+            {
+                Log("Custom command error: " + ex.Message);
+                MessageBox.Show("Custom command error: " + ex.Message);
+            }
+        }
+
+        private async void BtnApplyLicense_Click(object? sender, EventArgs e)
+        {
+            try
+            {
+                var projectRoot = txtInstallFolder.Text?.Trim();
+                if (string.IsNullOrEmpty(projectRoot) || !Directory.Exists(projectRoot))
+                {
+                    MessageBox.Show("Select project folder first.");
+                    return;
+                }
+
+                var apiUrl = txtLicenseApiUrl.Text?.Trim() ?? "";
+                var licenseId = txtDefaultLicenseId.Text?.Trim() ?? "";
+
+                if (string.IsNullOrEmpty(apiUrl) || string.IsNullOrEmpty(licenseId))
+                {
+                    MessageBox.Show("Fill both LICENSE_API_URL and DEFAULT_LICENSE_IDENTIFIER.");
+                    return;
+                }
+
+                var ok = await AppLogic.UpdateLicenseEnvAsync(projectRoot, apiUrl, licenseId, Log);
+                if (!ok)
+                {
+                    // .env not found – exactly what you requested
+                    MessageBox.Show("No .env file found in project root. Please generate .env file first.");
+                }
+                else
+                {
+                    MessageBox.Show("License settings updated in .env.");
+                }
+            }
+            catch (Exception ex)
+            {
+                Log("Apply license error: " + ex.Message);
+                MessageBox.Show("Apply license error: " + ex.Message);
+            }
+        }
+
+        private async void BtnResetSkipWorktree_Click(object? sender, EventArgs e)
+        {
+            try
+            {
+                var projectRoot = txtInstallFolder.Text?.Trim();
+                if (string.IsNullOrEmpty(projectRoot) || !Directory.Exists(projectRoot))
+                {
+                    MessageBox.Show("Select project folder first.");
+                    return;
+                }
+
+                var confirm = MessageBox.Show(
+                    "This will:\n" +
+                    "  - Clear skip-worktree on ALL tracked files\n" +
+                    "  - Delete .deploy_protected protected store\n" +
+                    "  - Delete controller backup files (*.deploybak.*)\n\n" +
+                    "Continue?",
+                    "Full protection reset",
+                    MessageBoxButtons.YesNo,
+                    MessageBoxIcon.Warning);
+
+                if (confirm != DialogResult.Yes)
+                    return;
+
+                await AppLogic.ResetAllProtectionAsync(projectRoot, Log);
+
+                txtSkipPath.Text = string.Empty;
+                SettingsManager.Save("SkipPath", "");
+
+                MessageBox.Show("Full protection reset completed. Check log for details.");
+            }
+            catch (Exception ex)
+            {
+                Log("Reset protection error: " + ex.Message);
+                MessageBox.Show("Reset protection error: " + ex.Message);
+            }
+        }
+
 
         // ---------------- SQL / DB ----------------
 
@@ -1032,7 +1313,22 @@ namespace DeployKeyGitClient
 
         private void BtnEnablePhpZip_Click(object? sender, EventArgs e)
         {
-            MessageBox.Show("Use AppLogic.EnablePhpZip (admin required). This UI placeholder avoids duplicate code. See logs.");
+            var ok = AppLogic.EnablePhpExtension("zip", Log);
+            MessageBox.Show(
+                ok
+                    ? "PHP zip extension enabled in php.ini (backup created). Restart XAMPP/Apache, then run Composer again."
+                    : "Could not enable zip automatically. Check the log and edit php.ini manually if needed."
+            );
+        }
+
+        private void BtnEnablePhpGd_Click(object? sender, EventArgs e)
+        {
+            var ok = AppLogic.EnablePhpExtension("gd", Log);
+            MessageBox.Show(
+                ok
+                    ? "PHP gd extension enabled in php.ini (backup created). Restart XAMPP/Apache, then click Composer Install again."
+                    : "Could not enable gd automatically. Check the log and edit php.ini manually if needed."
+            );
         }
 
         private async void BtnCreateVHost_Click(object? sender, EventArgs e)
@@ -1158,8 +1454,29 @@ namespace DeployKeyGitClient
         {
             try
             {
-                await AppLogic.ToggleSkipWorktreeAsync(txtInstallFolder.Text.Trim(), txtSkipPath.Text.Trim(), Log);
-                MessageBox.Show("Skip-worktree toggle attempted. Check log.");
+                var projectRoot = txtInstallFolder.Text?.Trim();
+                if (string.IsNullOrEmpty(projectRoot) || !Directory.Exists(projectRoot))
+                {
+                    MessageBox.Show("Select project folder.");
+                    return;
+                }
+
+                var raw = txtSkipPath.Text ?? "";
+                // Support newline, comma, semicolon separated paths
+                var parts = raw
+                    .Split(new[] { '\r', '\n', ',', ';' }, StringSplitOptions.RemoveEmptyEntries)
+                    .Select(p => p.Trim())
+                    .Where(p => !string.IsNullOrWhiteSpace(p))
+                    .ToArray();
+
+                if (parts.Length == 0)
+                {
+                    MessageBox.Show("Enter at least one relative path (file or folder) to protect.");
+                    return;
+                }
+
+                await AppLogic.ToggleSkipWorktreeListAsync(projectRoot, parts, Log);
+                MessageBox.Show("Skip-worktree toggle attempted for all listed paths. Check log for details.");
             }
             catch (Exception ex)
             {

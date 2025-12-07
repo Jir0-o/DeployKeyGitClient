@@ -65,7 +65,13 @@ namespace DeployKeyGitClient
         // --- High-level operations used by UI (clone/pull/sql etc) ---
         // (Existing methods kept; unchanged except process helpers have shared _currentProcess)
 
-        public static async Task CloneIntoTempThenMoveAsync(string gitUrl, string targetFolder, Action<int>? progress, Action<string> log, string? privateKeyPath = null)
+        public static async Task CloneIntoTempThenMoveAsync(
+            string gitUrl,
+            string targetFolder,
+            Action<int>? progress,
+            Action<string> log,
+            string? privateKeyPath = null,
+            string? branchName = null)
         {
             progress?.Invoke(0);
             var sshUrl = ConvertToSshIfHttps(gitUrl);
@@ -78,7 +84,12 @@ namespace DeployKeyGitClient
             {
                 log($"Cloning {sshUrl} -> {tempRepo}");
                 var env = CreateGitSshEnv(privateKeyPath);
-                var r = await RunProcessCaptureAsync("git", $"clone \"{sshUrl}\" \"{tempRepo}\"", env, null, log);
+
+                var branchArg = !string.IsNullOrWhiteSpace(branchName)
+                    ? $" -b {branchName} --single-branch"
+                    : string.Empty;
+
+                var r = await RunProcessCaptureAsync("git", $"clone{branchArg} \"{sshUrl}\" \"{tempRepo}\"", env, null, log);
                 log($"git clone exit {r.code}");
                 if (r.code != 0)
                 {
@@ -88,7 +99,6 @@ namespace DeployKeyGitClient
 
                 progress?.Invoke(60);
 
-                // move or copy into target
                 if (Directory.Exists(targetFolder) && Directory.EnumerateFileSystemEntries(targetFolder).Any())
                 {
                     TryDeleteDirectory(targetFolder, log);
@@ -115,12 +125,35 @@ namespace DeployKeyGitClient
             }
         }
 
-        public static async Task PullUpdateAsync(string targetFolder, Action<int>? progress, Action<string> log, string? privateKeyPath = null)
+
+        public static async Task PullUpdateAsync(
+            string targetFolder,
+            Action<int>? progress,
+            Action<string> log,
+            string? privateKeyPath = null,
+            string? branchName = null)
         {
             progress?.Invoke(0);
             var env = CreateGitSshEnv(privateKeyPath);
 
-            // Check local changes
+            // If a branch is specified, make sure we are on that branch
+            if (!string.IsNullOrWhiteSpace(branchName))
+            {
+                log($"Switching to branch {branchName}...");
+                var checkout = await RunProcessCaptureAsync("git", $"checkout {branchName}", env, targetFolder, log);
+                if (checkout.code != 0)
+                {
+                    log($"Branch {branchName} not found locally, trying to create from origin/{branchName}...");
+                    var create = await RunProcessCaptureAsync("git", $"checkout -b {branchName} origin/{branchName}", env, targetFolder, log);
+                    if (create.code != 0)
+                    {
+                        log($"Failed to switch to or create branch {branchName}. Pull aborted.");
+                        return;
+                    }
+                }
+            }
+
+            // Detect local changes
             var status = await RunProcessCaptureAsync("git", "status --porcelain", env, targetFolder, log);
             bool hasLocalChanges = !string.IsNullOrWhiteSpace(status.stdout);
             if (hasLocalChanges)
@@ -130,48 +163,37 @@ namespace DeployKeyGitClient
                 log($"stash exit {stash.code}");
             }
 
-            // Fetch remote
+            // Fetch and pull
             var fetch = await RunProcessCaptureAsync("git", "fetch --all --prune", env, targetFolder, log);
             log($"fetch exit {fetch.code}");
-            progress?.Invoke(30);
+            progress?.Invoke(40);
 
-            // Check if branch is behind remote (only then do we pull/merge)
-            var branchStatus = await RunProcessCaptureAsync("git", "status -sb", env, targetFolder, log);
-            var branchOut = branchStatus.stdout ?? string.Empty;
-
-            // Example: "## main...origin/main [behind 1]"
-            bool isBehind = branchOut.Contains("behind", StringComparison.OrdinalIgnoreCase);
-
-            if (!isBehind)
+            if (!string.IsNullOrWhiteSpace(branchName))
             {
-                log("No remote updates detected (branch is not behind). Skipping pull.");
-                progress?.Invoke(100);
-
-                if (hasLocalChanges)
-                {
-                    var pop = await RunProcessCaptureAsync("git", "stash pop", env, targetFolder, log);
-                    log($"stash pop exit {pop.code}");
-                }
-
-                return;
-            }
-
-            log("Remote has new commits. Applying pull/merge.");
-
-            // Try fast-forward merge first
-            var merge = await RunProcessCaptureAsync("git", "merge --ff-only @{u}", env, targetFolder, log);
-            if (merge.code != 0)
-            {
-                log("Fast-forward failed. Trying pull --rebase.");
-                var pull = await RunProcessCaptureAsync("git", "pull --rebase", env, targetFolder, log);
+                // Explicit branch pull
+                log($"Pulling latest from origin/{branchName} with rebase...");
+                var pull = await RunProcessCaptureAsync("git", $"pull --rebase origin {branchName}", env, targetFolder, log);
                 log($"pull exit {pull.code}");
                 if (pull.code != 0) log("Pull failed or conflicts occurred. Manual resolution required.");
             }
             else
             {
-                log("Fast-forward succeeded.");
+                // Old behavior for default/upstream branch
+                var merge = await RunProcessCaptureAsync("git", "merge --ff-only @{u}", env, targetFolder, log);
+                if (merge.code != 0)
+                {
+                    log("Fast-forward failed. Trying pull --rebase.");
+                    var pull = await RunProcessCaptureAsync("git", "pull --rebase", env, targetFolder, log);
+                    log($"pull exit {pull.code}");
+                    if (pull.code != 0) log("Pull failed or conflicts occurred. Manual resolution required.");
+                }
+                else
+                {
+                    log("Fast-forward succeeded.");
+                }
             }
 
+            // Restore stash if we had changes
             if (hasLocalChanges)
             {
                 var pop = await RunProcessCaptureAsync("git", "stash pop", env, targetFolder, log);
@@ -182,6 +204,28 @@ namespace DeployKeyGitClient
 
             // After pull, reapply protected functions if any present
             await ReapplyProtectedFunctionsAsync(targetFolder, log);
+        }
+
+        public static async Task RunCustomCommandAsync(string projectRoot, string commandLine, Action<string> log)
+        {
+            if (string.IsNullOrWhiteSpace(projectRoot) || !Directory.Exists(projectRoot))
+            {
+                log?.Invoke("CustomCmd: project root does not exist or is invalid.");
+                return;
+            }
+
+            if (string.IsNullOrWhiteSpace(commandLine))
+            {
+                log?.Invoke("CustomCmd: command is empty.");
+                return;
+            }
+
+            // Run through cmd.exe so it behaves like Windows CMD
+            var file = "cmd.exe";
+            var args = "/C " + commandLine;
+
+            log?.Invoke($"[CustomCmd] Running in {projectRoot}");
+            await RunProcessCaptureAsync(file, args, null, projectRoot, log);
         }
 
         // SQL import / backup / env creation - unchanged from previous, included for completeness
@@ -241,6 +285,44 @@ namespace DeployKeyGitClient
             return true;
         }
 
+        public static async Task<bool> UpdateLicenseEnvAsync(
+            string projectRoot,
+            string licenseApiUrl,
+            string licenseIdentifier,
+            Action<string> log)
+        {
+            try
+            {
+                var envPath = Path.Combine(projectRoot, ".env");
+                if (!File.Exists(envPath))
+                {
+                    log(".env not found in project root: " + envPath);
+                    return false; // caller will tell user to generate .env
+                }
+
+                var text = await File.ReadAllTextAsync(envPath, Encoding.UTF8);
+
+                // Reuse existing env helper inside this class
+                text = ReplaceOrAppendEnvKey(text, "LICENSE_API_URL", licenseApiUrl);
+                text = ReplaceOrAppendEnvKey(text, "DEFAULT_LICENSE_IDENTIFIER", licenseIdentifier);
+
+                // Backup before writing
+                var backup = envPath + ".bak." + DateTime.Now.ToString("yyyyMMddHHmmss");
+                File.Copy(envPath, backup, true);
+                log("Backed up .env to: " + backup);
+
+                await File.WriteAllTextAsync(envPath, text, Encoding.UTF8);
+                log("Updated LICENSE_API_URL and DEFAULT_LICENSE_IDENTIFIER in .env");
+
+                return true;
+            }
+            catch (Exception ex)
+            {
+                log("UpdateLicenseEnvAsync error: " + ex.Message);
+                return false;
+            }
+        }
+
         public static async Task RunComposerInstallWithFallbackAsync(string projectRoot, Action<string> log)
         {
             log("Composer: attempting install");
@@ -285,40 +367,107 @@ namespace DeployKeyGitClient
 
         public static async Task ToggleSkipWorktreeAsync(string projectRoot, string relPath, Action<string> log)
         {
-            await ToggleSkipWorktreeInternal(projectRoot, relPath, null, log);
+            if (string.IsNullOrWhiteSpace(projectRoot) || !Directory.Exists(projectRoot))
+            {
+                log?.Invoke("ToggleSkipWorktree: project root does not exist or is empty.");
+                return;
+            }
+
+            if (string.IsNullOrWhiteSpace(relPath))
+            {
+                log?.Invoke("ToggleSkipWorktree: path is empty.");
+                return;
+            }
+
+            var normalized = relPath.Replace('\\', '/').TrimStart('/', '\\');
+            var fullPath = Path.Combine(projectRoot, normalized.Replace('/', Path.DirectorySeparatorChar));
+            if (Directory.Exists(fullPath))
+            {
+                log?.Invoke($"ToggleSkipWorktree: '{normalized}' is a folder. Applying to all tracked files under it.");
+
+                var list = await RunProcessCaptureAsync("git", $"ls-files \"{normalized}/\"", null, projectRoot, log);
+                if (string.IsNullOrWhiteSpace(list.stdout))
+                {
+                    log?.Invoke($"ToggleSkipWorktree: No tracked files found under folder '{normalized}'. " +
+                                "If files are ignored/untracked, skip-worktree cannot apply.");
+                    return;
+                }
+
+                var files = list.stdout
+                    .Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries)
+                    .Select(l => l.Trim())
+                    .Where(l => l.Length > 0)
+                    .ToList();
+
+                foreach (var f in files)
+                {
+                    await ToggleSkipWorktreeInternal(projectRoot, f, null, log);
+                }
+            }
+            else
+            {
+                await ToggleSkipWorktreeInternal(projectRoot, normalized, null, log);
+            }
         }
 
+
         // internal helper used by ToggleSkipWorktreeAsync and other callers
-        private static async Task ToggleSkipWorktreeInternal(string projectRoot, string relPath, bool? setSkip, Action<string> log)
+        private static async Task ToggleSkipWorktreeInternal(
+            string projectRoot,
+            string relPath,
+            bool? setSkip,
+            Action<string> log)
         {
             try
             {
-                var path = relPath.Replace('/', Path.DirectorySeparatorChar).TrimStart(Path.DirectorySeparatorChar);
-                // Check current skip-worktree status
+                var path = relPath.Replace('\\', '/').TrimStart('/');
+
+                // Check if path is tracked
                 var check = await RunProcessCaptureAsync("git", $"ls-files -v \"{path}\"", null, projectRoot, log);
-                var isSkipped = (check.stdout ?? "").Split('\n').Any(l => l.Length > 0 && l[0] == 'S');
+                var output = check.stdout ?? string.Empty;
+
+                if (string.IsNullOrWhiteSpace(output))
+                {
+                    log?.Invoke($"ToggleSkipWorktree: Path '{path}' is not tracked by git. " +
+                                "It may be ignored or never committed. skip-worktree only works on tracked files.");
+                    return;
+                }
+
+                // ls-files -v output e.g. "S app/Http/Controllers/Sales/OrderController.php"
+                var firstLine = output.Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries)
+                                    .FirstOrDefault() ?? "";
+                var isSkipped = firstLine.Length > 0 && firstLine[0] == 'S';
 
                 if (setSkip == true)
                 {
                     var r = await RunProcessCaptureAsync("git", $"update-index --skip-worktree \"{path}\"", null, projectRoot, log);
-                    log?.Invoke($"git update-index --skip-worktree exit {r.code}");
+                    log?.Invoke($"git update-index --skip-worktree \"{path}\" exit {r.code}");
+                    if (r.code != 0 && !string.IsNullOrWhiteSpace(r.stderr))
+                        log?.Invoke("ERR: " + r.stderr);
                 }
                 else if (setSkip == false)
                 {
                     var r = await RunProcessCaptureAsync("git", $"update-index --no-skip-worktree \"{path}\"", null, projectRoot, log);
-                    log?.Invoke($"git update-index --no-skip-worktree exit {r.code}");
+                    log?.Invoke($"git update-index --no-skip-worktree \"{path}\" exit {r.code}");
+                    if (r.code != 0 && !string.IsNullOrWhiteSpace(r.stderr))
+                        log?.Invoke("ERR: " + r.stderr);
                 }
                 else
                 {
+                    // Toggle mode
                     if (isSkipped)
                     {
                         var r = await RunProcessCaptureAsync("git", $"update-index --no-skip-worktree \"{path}\"", null, projectRoot, log);
                         log?.Invoke($"Unmarked skip-worktree for {path} (exit {r.code})");
+                        if (r.code != 0 && !string.IsNullOrWhiteSpace(r.stderr))
+                            log?.Invoke("ERR: " + r.stderr);
                     }
                     else
                     {
                         var r = await RunProcessCaptureAsync("git", $"update-index --skip-worktree \"{path}\"", null, projectRoot, log);
                         log?.Invoke($"Marked skip-worktree for {path} (exit {r.code})");
+                        if (r.code != 0 && !string.IsNullOrWhiteSpace(r.stderr))
+                            log?.Invoke("ERR: " + r.stderr);
                     }
                 }
             }
@@ -383,6 +532,239 @@ namespace DeployKeyGitClient
             catch (Exception ex)
             {
                 log("ProtectFunctionAsync error: " + ex.Message);
+                return false;
+            }
+        }
+
+        public static async Task ToggleSkipWorktreeListAsync(string projectRoot, string[] relPaths, Action<string> log)
+        {
+            if (string.IsNullOrWhiteSpace(projectRoot) || !Directory.Exists(projectRoot))
+            {
+                log?.Invoke("ToggleSkipWorktreeList: project root does not exist or is empty.");
+                return;
+            }
+
+            if (relPaths == null || relPaths.Length == 0)
+            {
+                log?.Invoke("ToggleSkipWorktreeList: no paths provided.");
+                return;
+            }
+
+            foreach (var raw in relPaths)
+            {
+                var normalized = raw.Replace('\\', '/').TrimStart('/', '\\');
+                if (string.IsNullOrWhiteSpace(normalized))
+                    continue;
+
+                var fullPath = Path.Combine(projectRoot, normalized.Replace('/', Path.DirectorySeparatorChar));
+                if (Directory.Exists(fullPath))
+                {
+                    log?.Invoke($"[skip] '{normalized}' is a folder. Applying skip-worktree to all tracked files under it.");
+
+                    // List tracked files under this folder
+                    var list = await RunProcessCaptureAsync("git", $"ls-files \"{normalized}/\"", null, projectRoot, log);
+                    if (string.IsNullOrWhiteSpace(list.stdout))
+                    {
+                        log?.Invoke($"[skip] No tracked files found under '{normalized}'. " +
+                                    "If files are ignored/untracked, skip-worktree cannot apply.");
+                        continue;
+                    }
+
+                    var files = list.stdout
+                        .Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries)
+                        .Select(l => l.Trim())
+                        .Where(l => l.Length > 0)
+                        .ToList();
+
+                    foreach (var f in files)
+                    {
+                        await ToggleSkipWorktreeInternal(projectRoot, f, null, log);
+                    }
+                }
+                else
+                {
+                    // Treat as single file
+                    await ToggleSkipWorktreeInternal(projectRoot, normalized, null, log);
+                }
+            }
+        }
+
+        public static async Task ResetAllSkipWorktreeAsync(string projectRoot, Action<string> log)
+        {
+            if (string.IsNullOrWhiteSpace(projectRoot) || !Directory.Exists(projectRoot))
+            {
+                log?.Invoke("ResetAllSkipWorktree: project root does not exist or is empty.");
+                return;
+            }
+
+            log?.Invoke("ResetAllSkipWorktree: scanning for files with skip-worktree set...");
+
+            // List all tracked files with their flags
+            var list = await RunProcessCaptureAsync("git", "ls-files -v", null, projectRoot, log);
+            if (list.code != 0)
+            {
+                log?.Invoke("ResetAllSkipWorktree: git ls-files failed: " + list.stderr);
+                return;
+            }
+
+            var lines = (list.stdout ?? string.Empty)
+                .Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries)
+                .Select(l => l.Trim())
+                .ToList();
+
+            var skippedFiles = lines
+                .Where(l => l.Length > 2 && l[0] == 'S') // 'S' at start means skip-worktree
+                .Select(l =>
+                {
+                    // format: "S path/to/file.php"
+                    var spaceIdx = l.IndexOf(' ');
+                    return spaceIdx > 0 ? l.Substring(spaceIdx + 1).Trim() : null;
+                })
+                .Where(p => !string.IsNullOrWhiteSpace(p))
+                .ToList();
+
+            if (!skippedFiles.Any())
+            {
+                log?.Invoke("ResetAllSkipWorktree: no files currently marked skip-worktree.");
+                return;
+            }
+
+            log?.Invoke($"ResetAllSkipWorktree: found {skippedFiles.Count} file(s) with skip-worktree. Resetting...");
+
+            foreach (var path in skippedFiles)
+            {
+                var r = await RunProcessCaptureAsync("git", $"update-index --no-skip-worktree \"{path}\"", null, projectRoot, log);
+                log?.Invoke($"update-index --no-skip-worktree \"{path}\" exit {r.code}");
+                if (r.code != 0 && !string.IsNullOrWhiteSpace(r.stderr))
+                    log?.Invoke("ERR: " + r.stderr);
+            }
+
+            log?.Invoke("ResetAllSkipWorktree: completed. All skip-worktree flags cleared.");
+        }
+        
+
+        public static async Task ResetAllProtectionAsync(string projectRoot, Action<string> log)
+        {
+            if (string.IsNullOrWhiteSpace(projectRoot) || !Directory.Exists(projectRoot))
+            {
+                log?.Invoke("ResetAllProtection: project root does not exist or is empty.");
+                return;
+            }
+
+            log?.Invoke("ResetAllProtection: starting full reset (skip-worktree + protected store cleanup).");
+
+            // 1) Clear ALL skip-worktree flags
+            await ResetAllSkipWorktreeAsync(projectRoot, log);
+
+            // 2) Delete protected store folder .deploy_protected
+            try
+            {
+                var storeDir = Path.Combine(projectRoot, ProtectedStoreFolderName);
+                if (Directory.Exists(storeDir))
+                {
+                    Directory.Delete(storeDir, true);
+                    log?.Invoke($"ResetAllProtection: deleted protected store folder: {storeDir}");
+                }
+                else
+                {
+                    log?.Invoke("ResetAllProtection: no .deploy_protected folder found (nothing to delete).");
+                }
+            }
+            catch (Exception ex)
+            {
+                log?.Invoke("ResetAllProtection: error deleting .deploy_protected folder: " + ex.Message);
+            }
+
+            // 3) Optional: delete backup controller copies *.deploybak.*
+            try
+            {
+                var controllersRoot = Path.Combine(projectRoot, "app", "Http", "Controllers");
+                if (Directory.Exists(controllersRoot))
+                {
+                    var bakFiles = Directory.GetFiles(controllersRoot, "*.deploybak.*", SearchOption.AllDirectories);
+                    foreach (var f in bakFiles)
+                    {
+                        try
+                        {
+                            File.Delete(f);
+                            log?.Invoke($"ResetAllProtection: deleted backup file {f}");
+                        }
+                        catch (Exception ex)
+                        {
+                            log?.Invoke($"ResetAllProtection: failed to delete backup file {f}: {ex.Message}");
+                        }
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                log?.Invoke("ResetAllProtection: error while removing backup files: " + ex.Message);
+            }
+
+            log?.Invoke("ResetAllProtection: completed.");
+        }
+
+
+
+        public static bool EnablePhpExtension(string extensionName, Action<string> log)
+        {
+            try
+            {
+                // Adjust if your XAMPP path is different
+                var iniPath = Path.Combine("C:\\", "xampp", "php", "php.ini");
+                if (!File.Exists(iniPath))
+                {
+                    log("php.ini not found at: " + iniPath);
+                    return false;
+                }
+
+                var text = File.ReadAllText(iniPath, Encoding.UTF8);
+                var original = text;
+
+                // Common commented patterns we want to uncomment
+                var patterns = new[]
+                {
+                    $";extension={extensionName}",
+                    $"; extension={extensionName}",
+                    $";extension={extensionName}.dll",
+                    $"; extension={extensionName}.dll"
+                };
+
+                var changed = false;
+                foreach (var p in patterns)
+                {
+                    if (text.Contains(p, StringComparison.OrdinalIgnoreCase))
+                    {
+                        text = text.Replace(p, $"extension={extensionName}", StringComparison.OrdinalIgnoreCase);
+                        changed = true;
+                    }
+                }
+
+                if (!changed)
+                {
+                    log($"No commented extension line for '{extensionName}' found in php.ini. " +
+                        "It might already be enabled, or the line name is different.");
+                    return false;
+                }
+
+                // Backup before writing
+                var backup = iniPath + ".bak." + DateTime.Now.ToString("yyyyMMddHHmmss");
+                File.Copy(iniPath, backup, true);
+                log("Backed up php.ini to: " + backup);
+
+                File.WriteAllText(iniPath, text, Encoding.UTF8);
+                log($"Enabled extension '{extensionName}' in php.ini. Restart Apache/XAMPP and try Composer again.");
+
+                return true;
+            }
+            catch (UnauthorizedAccessException ua)
+            {
+                log("Permission error editing php.ini (run app as Administrator): " + ua.Message);
+                return false;
+            }
+            catch (Exception ex)
+            {
+                log("EnablePhpExtension error: " + ex.Message);
                 return false;
             }
         }
