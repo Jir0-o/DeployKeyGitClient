@@ -136,6 +136,30 @@ namespace DeployKeyGitClient
             progress?.Invoke(0);
             var env = CreateGitSshEnv(privateKeyPath);
 
+            // 🔹 NEW: mark this repo as safe for the current user (fix "dubious ownership")
+            try
+            {
+                var safePath = (targetFolder ?? "").TrimEnd('\\', '/').Replace('\\', '/');
+                if (!string.IsNullOrWhiteSpace(safePath))
+                {
+                    log($"Configuring git safe.directory for {safePath}");
+                    // safe.directory is not SSH-related, so no special env / workingDir needed
+                    var cfg = await RunProcessCaptureAsync(
+                        "git",
+                        $"config --global --add safe.directory \"{safePath}\"",
+                        null,
+                        null,
+                        log
+                    );
+                    log($"git config safe.directory exit {cfg.code}");
+                }
+            }
+            catch (Exception ex)
+            {
+                log("safe.directory config failed: " + ex.Message);
+                // we continue; worst case git will still throw and you'll see it in the log
+            }
+
             // If a branch is specified, make sure we are on that branch
             if (!string.IsNullOrWhiteSpace(branchName))
             {
@@ -205,6 +229,7 @@ namespace DeployKeyGitClient
             // After pull, reapply protected functions if any present
             await ReapplyProtectedFunctionsAsync(targetFolder, log);
         }
+
 
         public static async Task RunCustomCommandAsync(string projectRoot, string commandLine, Action<string> log)
         {

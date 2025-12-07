@@ -1,5 +1,5 @@
 using System;
-using System.Collections.Generic;
+using System.Diagnostics;
 using System.IO;
 using System.Threading.Tasks;
 using System.Windows.Forms;
@@ -15,9 +15,14 @@ namespace DeployKeyGitClientAgent
         private NotifyIcon _trayIcon;
         private ContextMenuStrip _trayMenu;
 
+        // Cached settings so we don't read file every tick
+        private string _repoFolder = "";
+        private string _keyFolder = "";
+        private string? _privateKeyPath = null;
+        private string? _branchName = null;
+
         public AgentForm()
         {
-            // We don't need visible UI
             this.Load += AgentForm_Load;
             this.Shown += AgentForm_Shown;
             this.FormClosing += AgentForm_FormClosing;
@@ -30,8 +35,12 @@ namespace DeployKeyGitClientAgent
             this.ShowInTaskbar = false;
             this.Visible = false;
 
+            // Load settings once at startup
+            LoadSettings();
+
             // Tray icon so user knows it's running
             _trayMenu = new ContextMenuStrip();
+            _trayMenu.Items.Add("Pull now", null, async (s, ea) => await RunPullAsync());
             _trayMenu.Items.Add("Open main app (admin)", null, (s, ea) => LaunchMainAsAdmin());
             _trayMenu.Items.Add("Exit agent", null, (s, ea) => Application.Exit());
 
@@ -39,23 +48,26 @@ namespace DeployKeyGitClientAgent
             {
                 Visible = true,
                 Text = "DeployKeyGitClient Agent",
-                Icon = System.Drawing.SystemIcons.Application, // Replace with your .ico if you want
+                Icon = System.Drawing.SystemIcons.Application, // replace with your .ico if you want
                 ContextMenuStrip = _trayMenu
             };
 
-            _trayIcon.DoubleClick += (s, ea) => LaunchMainAsAdmin();
+            _trayIcon.DoubleClick += async (s, ea) => await RunPullAsync();
 
             // Timer: 1 hour
             _timer = new System.Windows.Forms.Timer();
             _timer.Interval = 60 * 60 * 1000; // 1 hour
+            // For testing, you can temporarily set: _timer.Interval = 5 * 60 * 1000;
             _timer.Tick += async (s, ea) => await RunPullAsync();
             _timer.Start();
+
+            LogToFile("Agent started. Timer interval = " + (_timer.Interval / 1000) + " seconds.");
         }
 
-        private async void AgentForm_Shown(object? sender, EventArgs e)
+        private void AgentForm_Shown(object? sender, EventArgs e)
         {
-            // First pull shortly after startup
-            await RunPullAsync();
+            // First pull shortly after startup (fire and forget)
+            _ = RunPullAsync();
         }
 
         private void AgentForm_FormClosing(object? sender, FormClosingEventArgs e)
@@ -67,6 +79,52 @@ namespace DeployKeyGitClientAgent
             }
         }
 
+        private void LoadSettings()
+        {
+            try
+            {
+                var settings = SettingsManager.Load();
+
+                settings.TryGetValue("InstallFolder", out var installFolder);
+                settings.TryGetValue("KeyFolder", out var keyFolderVal);
+                settings.TryGetValue("GitBranch", out var branchVal);
+
+                _repoFolder = (installFolder ?? "").Trim();
+                _keyFolder  = (keyFolderVal ?? "").Trim();
+
+                _branchName = string.IsNullOrWhiteSpace(branchVal)
+                    ? null
+                    : branchVal.Trim();
+
+                if (!string.IsNullOrWhiteSpace(_keyFolder))
+                {
+                    var candidate = Path.Combine(_keyFolder, ".ssh", "deploy_key");
+                    if (File.Exists(candidate))
+                    {
+                        _privateKeyPath = candidate;
+                    }
+                    else
+                    {
+                        _privateKeyPath = null;
+                    }
+                }
+                else
+                {
+                    _privateKeyPath = null;
+                }
+
+                LogToFile(
+                    $"Agent: Settings loaded. RepoFolder='{_repoFolder}', " +
+                    $"KeyFolder='{_keyFolder}', Branch='{_branchName ?? "(default upstream)"}', " +
+                    $"PrivateKeyPath='{_privateKeyPath ?? "(none)"}'"
+                );
+            }
+            catch (Exception ex)
+            {
+                LogToFile("Agent: LoadSettings error: " + ex.Message);
+            }
+        }
+
         private async Task RunPullAsync()
         {
             if (_isPullRunning) return;
@@ -74,35 +132,36 @@ namespace DeployKeyGitClientAgent
 
             try
             {
-                var settings = SettingsManager.Load();
-                if (!settings.TryGetValue("InstallFolder", out var installFolder) ||
-                    string.IsNullOrWhiteSpace(installFolder) ||
-                    !Directory.Exists(installFolder))
+                // Re-load settings in case user changed things in main app
+                LoadSettings();
+
+                if (string.IsNullOrWhiteSpace(_repoFolder) || !Directory.Exists(_repoFolder))
                 {
-                    LogToFile("Agent: InstallFolder not set or not found, skipping pull.");
+                    LogToFile("Agent: Repo folder not set or does not exist. Skipping pull.");
                     return;
                 }
 
-                string keyFolder = "";
-                if (settings.TryGetValue("KeyFolder", out var keyFolderVal))
-                    keyFolder = keyFolderVal ?? "";
-
-                string? privateKeyPath = null;
-                if (!string.IsNullOrWhiteSpace(keyFolder))
+                if (string.IsNullOrWhiteSpace(_privateKeyPath) || !File.Exists(_privateKeyPath))
                 {
-                    var candidate = Path.Combine(keyFolder, ".ssh", "deploy_key");
-                    if (File.Exists(candidate))
-                        privateKeyPath = candidate;
+                    LogToFile("Agent: Private key not found. Expected: " +
+                              (string.IsNullOrEmpty(_keyFolder)
+                                  ? "(KeyFolder not set)"
+                                  : Path.Combine(_keyFolder, ".ssh", "deploy_key")));
+                    return;
                 }
 
-                LogToFile($"Agent: Starting auto-pull for '{installFolder}'.");
+                LogToFile(
+                    $"Agent: Starting git pull. Repo='{_repoFolder}', " +
+                    $"Branch='{_branchName ?? "(default upstream)"}', " +
+                    $"Key='{_privateKeyPath}'"
+                );
 
-                // Use AppLogic.PullUpdateAsync; no UI progress
                 await AppLogic.PullUpdateAsync(
-                    installFolder,
+                    _repoFolder,
                     v => { /* no progress bar in agent */ },
                     LogToFile,
-                    privateKeyPath
+                    _privateKeyPath,
+                    _branchName
                 );
 
                 LogToFile("Agent: Auto-pull finished.");
@@ -130,13 +189,13 @@ namespace DeployKeyGitClientAgent
                     return;
                 }
 
-                var psi = new System.Diagnostics.ProcessStartInfo
+                var psi = new ProcessStartInfo
                 {
                     FileName = mainExe,
                     UseShellExecute = true,
                     Verb = "runas" // UAC prompt
                 };
-                System.Diagnostics.Process.Start(psi);
+                Process.Start(psi);
             }
             catch (Exception ex)
             {
