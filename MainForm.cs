@@ -27,6 +27,9 @@ namespace DeployKeyGitClient
         private TextBox txtLog = null!;
         private ProgressBar progressBar = null!;
 
+        private System.Windows.Forms.Timer _autoPullTimer = null!;
+        private bool _autoPullRunning = false;
+
         private Button btnRemoveVHost = null!;
 
         // New: key path selector separate from project folder
@@ -69,6 +72,9 @@ namespace DeployKeyGitClient
         private Button btnReapplyProtected = null!;
         private Button btnMarkFileSkipWorktree = null!;
 
+        // Security UI
+        private Button btnChangeUnlockPassword = null!;
+
         // Generated key content
         private string? _privatePem;
         private string? _publicSsh;
@@ -84,6 +90,9 @@ namespace DeployKeyGitClient
         private Panel rightPanel = null!;
         private TableLayoutPanel leftTable = null!;
         private FlowLayoutPanel rightFlow = null!;
+
+        private readonly CredentialStore _creds = new CredentialStore();
+        private bool _isLocked = false;
 
         // Log group panel reference (so we can resize correctly)
         private Panel grpLogPanel = null!;
@@ -118,6 +127,120 @@ namespace DeployKeyGitClient
                 if (s.TryGetValue("PrivateKey", out v)) { _privatePem = v; }
             }
             catch { /* ignore */ }
+
+            // STARTUP: ensure admin/user credentials are in place and lock if needed
+            try
+            {
+                // Admin password must be created once; cannot be changed later
+                if (!_creds.HasAdminPassword())
+                {
+                    using var dlg = new Form
+                    {
+                        Width = 520,
+                        Height = 220,
+                        StartPosition = FormStartPosition.CenterParent,
+                        Text = "Set Admin Password (one-time)",
+                        FormBorderStyle = FormBorderStyle.FixedDialog,
+                        MaximizeBox = false,
+                        MinimizeBox = false
+                    };
+                    var lbl = new Label
+                    {
+                        Text = "No admin password found. Create one now (cannot be changed later):",
+                        Left = 12,
+                        Top = 12,
+                        Width = 480,
+                        Height = 32
+                    };
+                    var lbl1 = new Label { Text = "Admin password:", Left = 12, Top = 44, Width = 200 };
+                    var lbl2 = new Label { Text = "Confirm admin password:", Left = 12, Top = 76, Width = 200 };
+                    var txt1 = new TextBox { Left = 12, Top = 60, Width = 480, UseSystemPasswordChar = true };
+                    var txt2 = new TextBox { Left = 12, Top = 92, Width = 480, UseSystemPasswordChar = true };
+                    var btnOk = new Button { Text = "Set Admin Password", Left = 12, Top = 132, Width = 180, DialogResult = DialogResult.OK };
+                    var btnCancel = new Button { Text = "Exit App", Left = 204, Top = 132, Width = 100, DialogResult = DialogResult.Cancel };
+
+                    dlg.Controls.AddRange(new Control[] { lbl, lbl1, lbl2, txt1, txt2, btnOk, btnCancel });
+                    dlg.AcceptButton = btnOk;
+
+                    var dr = dlg.ShowDialog(this);
+                    if (dr == DialogResult.OK)
+                    {
+                        if (string.IsNullOrEmpty(txt1.Text) || txt1.Text != txt2.Text)
+                        {
+                            MessageBox.Show("Admin passwords do not match or empty. Exiting.");
+                            Application.Exit();
+                            return;
+                        }
+
+                        _creds.SetAdminPassword(txt1.Text);
+                        MessageBox.Show("Admin password set. It cannot be changed later.");
+                    }
+                    else
+                    {
+                        Application.Exit();
+                        return;
+                    }
+                }
+
+                // If no user (unlock) password set, prompt optionally to set one now
+                if (!_creds.HasUserPassword())
+                {
+                    using var dlg2 = new Form
+                    {
+                        Width = 520,
+                        Height = 220,
+                        StartPosition = FormStartPosition.CenterParent,
+                        Text = "Set Unlock Password (optional)",
+                        FormBorderStyle = FormBorderStyle.FixedDialog
+                    };
+                    var lbl2 = new Label
+                    {
+                        Text = "Set application unlock password (required each time app starts / restores):",
+                        Left = 12,
+                        Top = 12,
+                        Width = 480,
+                        Height = 32
+                    };
+                    var lbl21 = new Label { Text = "Unlock password:", Left = 12, Top = 44, Width = 200 };
+                    var lbl22 = new Label { Text = "Confirm unlock password:", Left = 12, Top = 76, Width = 200 };
+                    var ut1 = new TextBox { Left = 12, Top = 60, Width = 480, UseSystemPasswordChar = true };
+                    var ut2 = new TextBox { Left = 12, Top = 92, Width = 480, UseSystemPasswordChar = true };
+                    var ok2 = new Button { Text = "Set Unlock Password", Left = 12, Top = 132, Width = 180, DialogResult = DialogResult.OK };
+                    var cancel2 = new Button { Text = "Skip (can set later)", Left = 204, Top = 132, Width = 120, DialogResult = DialogResult.Cancel };
+
+                    dlg2.Controls.AddRange(new Control[] { lbl2, lbl21, lbl22, ut1, ut2, ok2, cancel2 });
+                    dlg2.AcceptButton = ok2;
+
+                    if (dlg2.ShowDialog(this) == DialogResult.OK)
+                    {
+                        if (string.IsNullOrEmpty(ut1.Text) || ut1.Text != ut2.Text)
+                        {
+                            MessageBox.Show("Unlock passwords do not match or empty. Skipping unlock password creation.");
+                        }
+                        else
+                        {
+                            _creds.SetUserPassword(ut1.Text);
+                            MessageBox.Show("Unlock password set.");
+                        }
+                    }
+                }
+
+                // If a user password exists, mark locked and prompt after form shown
+                if (_creds.HasUserPassword())
+                {
+                    _isLocked = true;
+                    BeginInvoke(new Action(() => { PromptUnlockIfNeeded(); }));
+                }
+            }
+            catch (Exception ex)
+            {
+                Log("Startup credential check error: " + ex.Message);
+            }
+
+            _autoPullTimer = new System.Windows.Forms.Timer();
+            _autoPullTimer.Interval = 60 * 60 * 1000; // 1 hour
+            _autoPullTimer.Tick += async (s, e) => await AutoPullTickAsync();
+            _autoPullTimer.Start();
         }
 
         private void InitUi()
@@ -127,7 +250,6 @@ namespace DeployKeyGitClient
             {
                 Dock = DockStyle.Fill,
                 Orientation = Orientation.Vertical,
-                // left slightly larger than previously
                 SplitterDistance = 760,
                 IsSplitterFixed = false,
                 BorderStyle = BorderStyle.FixedSingle
@@ -215,7 +337,7 @@ namespace DeployKeyGitClient
             grpRepo.Controls.Add(keyFolderRow);
             leftTable.Controls.Add(grpRepo);
 
-            // More groups (Git ops, DB, Composer, VHost, etc.) - keep layout compact
+            // Group: Git operations
             var grpGitOps = CreateGroupPanel("Git operations");
             var gitOpsFlow = new FlowLayoutPanel { Dock = DockStyle.Top, AutoSize = true, FlowDirection = FlowDirection.LeftToRight };
             btnClone = new Button { Text = "Clone to folder (temp -> move)", AutoSize = true };
@@ -229,6 +351,7 @@ namespace DeployKeyGitClient
             grpGitOps.Controls.Add(gitOpsFlow);
             leftTable.Controls.Add(grpGitOps);
 
+            // Group: DB / SQL
             var grpDb = CreateGroupPanel("Local DB / SQL (XAMPP)");
             var dbTbl = new TableLayoutPanel { Dock = DockStyle.Top, AutoSize = true, ColumnCount = 6 };
             dbTbl.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 40));
@@ -269,6 +392,7 @@ namespace DeployKeyGitClient
             grpDb.Controls.Add(sqlRow);
             leftTable.Controls.Add(grpDb);
 
+            // Group: Composer & Artisan
             var grpComposer = CreateGroupPanel("Composer & Artisan");
             var composerFlow = new FlowLayoutPanel { Dock = DockStyle.Top, AutoSize = true };
             btnComposerInstall = new Button { Text = "Composer Install (auto-update)", AutoSize = true };
@@ -283,6 +407,7 @@ namespace DeployKeyGitClient
             grpComposer.Controls.Add(composerFlow);
             leftTable.Controls.Add(grpComposer);
 
+            // Group: Virtual Host
             var grpVhost = CreateGroupPanel("Virtual Host");
             var vhostRow = new FlowLayoutPanel { Dock = DockStyle.Top, AutoSize = true };
             vhostRow.Controls.Add(new Label { Text = "Domain:", AutoSize = true, Padding = new Padding(6, 8, 0, 0) });
@@ -297,6 +422,7 @@ namespace DeployKeyGitClient
             grpVhost.Controls.Add(vhostRow);
             leftTable.Controls.Add(grpVhost);
 
+            // Group: Backoffice / API / Skip-worktree
             var grpApi = CreateGroupPanel("Backoffice / API / Skip-worktree");
             var apiRow = new FlowLayoutPanel { Dock = DockStyle.Top, AutoSize = true, FlowDirection = FlowDirection.LeftToRight };
             btnRegisterDevice = new Button { Text = "Register Device (Backoffice)", AutoSize = true };
@@ -321,6 +447,7 @@ namespace DeployKeyGitClient
 
             leftTable.Controls.Add(grpApi);
 
+            // Group: DB Tools
             var grpDbOps = CreateGroupPanel("DB Tools");
             var dbOpsFlow = new FlowLayoutPanel { Dock = DockStyle.Top, AutoSize = true };
             btnBackupDb = new Button { Text = "Backup Database", AutoSize = true };
@@ -332,6 +459,7 @@ namespace DeployKeyGitClient
             grpDbOps.Controls.Add(dbOpsFlow);
             leftTable.Controls.Add(grpDbOps);
 
+            // Group: Protect single function
             var grpProtect = CreateGroupPanel("Protect single function workflow (function-level)");
             var protectTbl = new TableLayoutPanel { Dock = DockStyle.Top, AutoSize = true, ColumnCount = 3 };
             protectTbl.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 140));
@@ -360,12 +488,35 @@ namespace DeployKeyGitClient
             grpProtect.Controls.Add(protectFlow);
             leftTable.Controls.Add(grpProtect);
 
+            // Group: Security (new)
+            var grpSecurity = CreateGroupPanel("Security");
+            var secFlow = new FlowLayoutPanel { Dock = DockStyle.Top, AutoSize = true };
+            btnChangeUnlockPassword = new Button { Text = "Change Unlock Password (admin required)", AutoSize = true };
+            btnChangeUnlockPassword.Click += BtnChangeUnlockPassword_Click;
+            secFlow.Controls.Add(btnChangeUnlockPassword);
+            grpSecurity.Controls.Add(secFlow);
+            leftTable.Controls.Add(grpSecurity);
+
             // Right side: public key editor and logs
-            rightFlow = new FlowLayoutPanel { Dock = DockStyle.Fill, FlowDirection = FlowDirection.TopDown, AutoScroll = true, WrapContents = false, Padding = new Padding(8) };
+            rightFlow = new FlowLayoutPanel
+            {
+                Dock = DockStyle.Fill,
+                FlowDirection = FlowDirection.TopDown,
+                AutoScroll = true,
+                WrapContents = false,
+                Padding = new Padding(8)
+            };
             rightPanel.Controls.Add(rightFlow);
 
             var lblPublicKey = new Label { Text = "Public deploy key (editable) - edit then Save to write files", AutoSize = true };
-            txtPublicKey = new TextBox { Multiline = true, ScrollBars = ScrollBars.Vertical, Width = Math.Max(400, splitMain.Panel2.ClientSize.Width - 40), Height = 280, Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right };
+            txtPublicKey = new TextBox
+            {
+                Multiline = true,
+                ScrollBars = ScrollBars.Vertical,
+                Width = Math.Max(400, splitMain.Panel2.ClientSize.Width - 40),
+                Height = 280,
+                Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right
+            };
             var pkButtons = new FlowLayoutPanel { AutoSize = true, FlowDirection = FlowDirection.LeftToRight };
             var btnLoad = new Button { Text = "Load Key from key folder", AutoSize = true };
             btnLoad.Click += BtnLoadKey_Click;
@@ -377,15 +528,20 @@ namespace DeployKeyGitClient
             rightFlow.Controls.Add(txtPublicKey);
             rightFlow.Controls.Add(pkButtons);
 
-            // Log area - dock and visible
+            // Log area
             grpLogPanel = CreateGroupPanel("Log");
-            // make log group fixed-size so FlowLayout will show it properly
             grpLogPanel.Height = 320;
             grpLogPanel.AutoSize = false;
-            // set initial width to match right panel
             grpLogPanel.Width = Math.Max(360, splitMain.Panel2.ClientSize.Width - 40);
 
-            txtLog = new TextBox { Multiline = true, ScrollBars = ScrollBars.Both, ReadOnly = true, Dock = DockStyle.Fill, Height = 300 };
+            txtLog = new TextBox
+            {
+                Multiline = true,
+                ScrollBars = ScrollBars.Both,
+                ReadOnly = true,
+                Dock = DockStyle.Fill,
+                Height = 300
+            };
             grpLogPanel.Controls.Add(txtLog);
             rightFlow.Controls.Add(grpLogPanel);
 
@@ -408,16 +564,46 @@ namespace DeployKeyGitClient
             // handle resizing to keep right textbox and log width responsive
             splitMain.Panel2.Resize += (s, e) =>
             {
-                // update public key width
                 txtPublicKey.Width = Math.Max(400, splitMain.Panel2.ClientSize.Width - 40);
 
-                // update log group width and inner textbox width
                 if (grpLogPanel != null)
                 {
                     grpLogPanel.Width = Math.Max(360, splitMain.Panel2.ClientSize.Width - 40);
-                    // ensure the internal txtLog receives proper width as it's Dock=Fill inside grpLogPanel
                     txtLog.Width = Math.Max(200, grpLogPanel.ClientSize.Width - 16);
                 }
+            };
+
+            // Lock on minimize
+            this.Resize += (s, e) =>
+            {
+                try
+                {
+                    if (this.WindowState == FormWindowState.Minimized)
+                    {
+                        _isLocked = true;
+                        Log("Application minimized - will require unlock on restore.");
+                    }
+                }
+                catch { }
+            };
+
+            // Optional: lock on deactivation (commented; enable if you want extra strict)
+            this.Deactivate += (s, e) =>
+            {
+                // _isLocked = true;
+            };
+
+            // Prompt on activation if locked
+            this.Activated += (s, e) =>
+            {
+                try
+                {
+                    if (_isLocked)
+                    {
+                        PromptUnlockIfNeeded();
+                    }
+                }
+                catch { }
             };
         }
 
@@ -430,17 +616,49 @@ namespace DeployKeyGitClient
                 Padding = new Padding(6),
                 BorderStyle = BorderStyle.FixedSingle
             };
-            var lbl = new Label { Text = title, Dock = DockStyle.Top, Font = new System.Drawing.Font(Font.FontFamily, 9.0f, System.Drawing.FontStyle.Bold), Height = 20 };
+            var lbl = new Label
+            {
+                Text = title,
+                Dock = DockStyle.Top,
+                Font = new System.Drawing.Font(Font.FontFamily, 9.0f, System.Drawing.FontStyle.Bold),
+                Height = 20
+            };
             pnl.Controls.Add(lbl);
             return pnl;
         }
 
         private void Log(string line)
         {
-            if (txtLog == null) return;
-            if (txtLog.InvokeRequired) txtLog.Invoke(new Action(() => { txtLog.AppendText($"[{DateTime.Now:HH:mm:ss}] {line}{Environment.NewLine}"); }));
-            else txtLog.AppendText($"[{DateTime.Now:HH:mm:ss}] {line}{Environment.NewLine}");
+            try
+            {
+                if (txtLog == null)
+                    return;
+
+                // If handle not created yet, just write to Debug and bail out
+                if (!txtLog.IsHandleCreated)
+                {
+                    System.Diagnostics.Debug.WriteLine($"[LOG-before-handle] {line}");
+                    return;
+                }
+
+                if (txtLog.InvokeRequired)
+                {
+                    txtLog.BeginInvoke(new Action(() =>
+                    {
+                        txtLog.AppendText($"[{DateTime.Now:HH:mm:ss}] {line}{Environment.NewLine}");
+                    }));
+                }
+                else
+                {
+                    txtLog.AppendText($"[{DateTime.Now:HH:mm:ss}] {line}{Environment.NewLine}");
+                }
+            }
+            catch
+            {
+               
+            }
         }
+
 
         // ---------------- Key UI handlers ----------------
 
@@ -450,7 +668,6 @@ namespace DeployKeyGitClient
             if (dlg.ShowDialog() == DialogResult.OK) txtKeyFolder.Text = dlg.SelectedPath;
         }
 
-        // Install/Repo browse fixes: opens folder browser and writes into txtInstallFolder
         private void BtnBrowse_Click(object? sender, EventArgs e)
         {
             using var dlg = new FolderBrowserDialog { Description = "Select folder to hold the repository" };
@@ -464,7 +681,7 @@ namespace DeployKeyGitClient
                 var pair = GenerateRsaOpenSshKeyPair(4096, comment: $"deploy@{Dns.GetHostName()}");
                 _privatePem = pair.privatePem;
                 _publicSsh = pair.publicSsh;
-                txtPublicKey.Text = _publicSsh; // now shows in editable box
+                txtPublicKey.Text = _publicSsh;
                 SettingsManager.Save("PrivateKey", _privatePem);
                 SettingsManager.Save("PublicKey", _publicSsh);
 
@@ -488,6 +705,7 @@ namespace DeployKeyGitClient
                     MessageBox.Show("Select key folder first.");
                     return;
                 }
+
                 var priv = Path.Combine(folder, ".ssh", "deploy_key");
                 var pub = Path.Combine(folder, ".ssh", "deploy_key.pub");
                 if (!File.Exists(pub) && File.Exists(Path.Combine(folder, "deploy_key.pub")))
@@ -538,11 +756,9 @@ namespace DeployKeyGitClient
                 var pubPath = Path.Combine(sshDir, "deploy_key.pub");
                 var privPath = Path.Combine(sshDir, "deploy_key");
 
-                // Write public key from editor
                 File.WriteAllText(pubPath, txtPublicKey.Text ?? "", Encoding.UTF8);
                 Log("Saved deploy public key to: " + pubPath);
 
-                // If private PEM exists in memory, save it; otherwise prompt user if they want to paste private PEM in a dialog
                 if (!string.IsNullOrEmpty(_privatePem))
                 {
                     File.WriteAllText(privPath, _privatePem, Encoding.UTF8);
@@ -551,7 +767,7 @@ namespace DeployKeyGitClient
                 }
                 else if (!File.Exists(privPath))
                 {
-                    var res = MessageBox.Show("No private key in memory. Do you want to paste private PEM now (recommended) ?", "Private key", MessageBoxButtons.YesNo);
+                    var res = MessageBox.Show("No private key in memory. Do you want to paste private PEM now (recommended)?", "Private key", MessageBoxButtons.YesNo);
                     if (res == DialogResult.Yes)
                     {
                         using var dlg = new Form { Width = 800, Height = 480, Text = "Paste Private PEM (deploy_key)" };
@@ -590,7 +806,6 @@ namespace DeployKeyGitClient
 
         private void BtnSaveKeys_Click(object? sender, EventArgs e)
         {
-            // Shortcut to save current key pair to KeyFolder (same behavior as SaveKeyFromText but ensures privatePem written)
             BtnSaveKeyFromText_Click(sender, e);
         }
 
@@ -605,6 +820,53 @@ namespace DeployKeyGitClient
             }
         }
 
+        private async Task AutoPullTickAsync()
+        {
+            if (_autoPullRunning) return; // safety: no overlapping runs
+            _autoPullRunning = true;
+
+            try
+            {
+                var targetFolder = txtInstallFolder.Text?.Trim();
+                if (string.IsNullOrEmpty(targetFolder) || !Directory.Exists(targetFolder))
+                {
+                    Log("Auto-pull skipped: Install/Repo folder not set or does not exist.");
+                    return;
+                }
+
+                // choose private key from key folder if not already set
+                if (string.IsNullOrEmpty(_privateKeyPath) && !string.IsNullOrEmpty(txtKeyFolder.Text))
+                {
+                    var candidate = Path.Combine(txtKeyFolder.Text, ".ssh", "deploy_key");
+                    if (File.Exists(candidate)) _privateKeyPath = candidate;
+                }
+
+                Log("Auto-pull tick: checking for remote updates...");
+                try { progressBar.Value = 0; } catch { }
+
+                await AppLogic.PullUpdateAsync(
+                    targetFolder,
+                    v =>
+                    {
+                        try { progressBar.Value = v; } catch { }
+                    },
+                    Log,
+                    _privateKeyPath
+                );
+
+                Log("Auto-pull tick finished.");
+                try { progressBar.Value = 100; } catch { }
+            }
+            catch (Exception ex)
+            {
+                Log("Auto-pull tick error: " + ex.Message);
+            }
+            finally
+            {
+                _autoPullRunning = false;
+            }
+        }
+
         // ---------------- Clone / Pull ----------------
 
         private async void BtnClone_Click(object? sender, EventArgs e)
@@ -612,14 +874,17 @@ namespace DeployKeyGitClient
             try
             {
                 var gitUrl = txtGitUrl.Text?.Trim();
-                if (string.IsNullOrEmpty(gitUrl)) { MessageBox.Show("Enter the repository URL."); return; }
+                if (string.IsNullOrEmpty(gitUrl))
+                {
+                    MessageBox.Show("Enter the repository URL.");
+                    return;
+                }
 
                 if (string.IsNullOrEmpty(txtKeyFolder.Text?.Trim()) && string.IsNullOrEmpty(_privateKeyPath))
                 {
                     MessageBox.Show("Either save a private key to Key folder or set private key path.");
                 }
 
-                // Choose privateKeyPath from key folder if available
                 if (string.IsNullOrEmpty(_privateKeyPath) && !string.IsNullOrEmpty(txtKeyFolder.Text) && Directory.Exists(txtKeyFolder.Text))
                 {
                     var candidate = Path.Combine(txtKeyFolder.Text, ".ssh", "deploy_key");
@@ -633,17 +898,30 @@ namespace DeployKeyGitClient
                 }
 
                 var targetFolder = txtInstallFolder.Text?.Trim();
-                if (string.IsNullOrEmpty(targetFolder)) { MessageBox.Show("Select target folder."); return; }
+                if (string.IsNullOrEmpty(targetFolder))
+                {
+                    MessageBox.Show("Select target folder.");
+                    return;
+                }
 
                 if (Directory.Exists(targetFolder) && Directory.EnumerateFileSystemEntries(targetFolder).Any())
                 {
                     var confirm = MessageBox.Show(
                         $"Folder '{targetFolder}' is not empty.\n\nThis application will DELETE ALL CONTENTS of the folder before moving the cloned project into it.\n\nProceed?",
                         "Confirm overwrite and clone",
-                        MessageBoxButtons.YesNo, MessageBoxIcon.Warning);
-                    if (confirm != DialogResult.Yes) { Log("User cancelled clone into non-empty folder."); return; }
+                        MessageBoxButtons.YesNo,
+                        MessageBoxIcon.Warning);
+
+                    if (confirm != DialogResult.Yes)
+                    {
+                        Log("User cancelled clone into non-empty folder.");
+                        return;
+                    }
                 }
-                else Directory.CreateDirectory(targetFolder);
+                else
+                {
+                    Directory.CreateDirectory(targetFolder);
+                }
 
                 progressBar.Value = 0;
                 await AppLogic.CloneIntoTempThenMoveAsync(gitUrl, targetFolder, v => progressBar.Value = v, Log, _privateKeyPath);
@@ -667,7 +945,6 @@ namespace DeployKeyGitClient
                     return;
                 }
 
-                // choose key from key folder if not set
                 if (string.IsNullOrEmpty(_privateKeyPath) && !string.IsNullOrEmpty(txtKeyFolder.Text))
                 {
                     var candidate = Path.Combine(txtKeyFolder.Text, ".ssh", "deploy_key");
@@ -708,6 +985,7 @@ namespace DeployKeyGitClient
                     MessageBox.Show("Select a SQL file first.");
                     return;
                 }
+
                 var db = new AppLogic.DbInfo
                 {
                     Host = txtDbHost.Text.Trim(),
@@ -813,9 +1091,19 @@ namespace DeployKeyGitClient
             try
             {
                 var domain = txtVHostDomain.Text?.Trim();
-                if (string.IsNullOrEmpty(domain)) { MessageBox.Show("Enter domain (e.g. shoe.com)"); return; }
+                if (string.IsNullOrEmpty(domain))
+                {
+                    MessageBox.Show("Enter domain (e.g. shoe.com)");
+                    return;
+                }
+
                 var projectRoot = txtInstallFolder.Text?.Trim();
-                if (string.IsNullOrEmpty(projectRoot) || !Directory.Exists(projectRoot)) { MessageBox.Show("Select project folder."); return; }
+                if (string.IsNullOrEmpty(projectRoot) || !Directory.Exists(projectRoot))
+                {
+                    MessageBox.Show("Select project folder.");
+                    return;
+                }
+
                 var publicPath = Path.Combine(projectRoot, "public");
                 var ok = await AppLogic.CreateVirtualHostAsync(domain, publicPath, Log);
                 MessageBox.Show(ok ? "Virtual host created (check logs). Make sure app is run as Administrator." : "Failed. See log.");
@@ -832,9 +1120,18 @@ namespace DeployKeyGitClient
             try
             {
                 var domain = txtVHostDomain.Text?.Trim();
-                if (string.IsNullOrEmpty(domain)) { MessageBox.Show("Enter domain to remove (e.g. myproject.local)"); return; }
+                if (string.IsNullOrEmpty(domain))
+                {
+                    MessageBox.Show("Enter domain to remove (e.g. myproject.local)");
+                    return;
+                }
 
-                var confirm = MessageBox.Show($"This will attempt to remove vhost, hosts entry and certs for '{domain}'. Continue?", "Confirm remove", MessageBoxButtons.YesNo, MessageBoxIcon.Warning);
+                var confirm = MessageBox.Show(
+                    $"This will attempt to remove vhost, hosts entry and certs for '{domain}'. Continue?",
+                    "Confirm remove",
+                    MessageBoxButtons.YesNo,
+                    MessageBoxIcon.Warning);
+
                 if (confirm != DialogResult.Yes) return;
 
                 var ok = await AppLogic.RemoveVirtualHostAsync(domain, Log);
@@ -866,13 +1163,26 @@ namespace DeployKeyGitClient
             try
             {
                 var url = txtApiUrl.Text?.Trim();
-                if (string.IsNullOrEmpty(url)) { MessageBox.Show("Enter API URL."); return; }
+                if (string.IsNullOrEmpty(url))
+                {
+                    MessageBox.Show("Enter API URL.");
+                    return;
+                }
+
                 var projectRoot = txtInstallFolder.Text?.Trim();
-                if (string.IsNullOrEmpty(projectRoot) || !Directory.Exists(projectRoot)) { MessageBox.Show("Select project folder."); return; }
+                if (string.IsNullOrEmpty(projectRoot) || !Directory.Exists(projectRoot))
+                {
+                    MessageBox.Show("Select project folder.");
+                    return;
+                }
 
                 var rel = "app/Http/Controllers/Sales/OrderController.php";
                 var file = Path.Combine(projectRoot, rel.Replace('/', Path.DirectorySeparatorChar));
-                if (!File.Exists(file)) { MessageBox.Show($"Controller not found at {file}"); return; }
+                if (!File.Exists(file))
+                {
+                    MessageBox.Show($"Controller not found at {file}");
+                    return;
+                }
 
                 var bak = file + ".deploybak." + DateTime.Now.ToString("yyyyMMddHHmmss");
                 File.Copy(file, bak);
@@ -880,7 +1190,9 @@ namespace DeployKeyGitClient
 
                 var text = File.ReadAllText(file, Encoding.UTF8);
                 var replaced = Regex.Replace(text, @"Http::post\(\s*(['""]?)#\1\s*,", $"Http::post('{url}',", RegexOptions.IgnoreCase);
-                if (replaced == text) replaced = text.Replace("Http::post('#'", $"Http::post('{url}'");
+                if (replaced == text)
+                    replaced = text.Replace("Http::post('#'", $"Http::post('{url}'");
+
                 File.WriteAllText(file, replaced, Encoding.UTF8);
                 Log("OrderController.php patched with API URL.");
                 await AppLogic.ToggleSkipWorktreeAsync(projectRoot, rel, Log);
@@ -919,9 +1231,14 @@ namespace DeployKeyGitClient
                     MessageBox.Show("Select project folder.");
                     return;
                 }
+
                 var rel = txtControllerRelPath.Text?.Trim();
                 var fn = txtFunctionName.Text?.Trim();
-                if (string.IsNullOrEmpty(rel) || string.IsNullOrEmpty(fn)) { MessageBox.Show("Set controller path and function name."); return; }
+                if (string.IsNullOrEmpty(rel) || string.IsNullOrEmpty(fn))
+                {
+                    MessageBox.Show("Set controller path and function name.");
+                    return;
+                }
 
                 var ok = await AppLogic.ProtectFunctionAsync(projectRoot, rel, fn, Log);
                 MessageBox.Show(ok ? "Function body saved to protected store." : "Protect failed (pattern not found). See log.");
@@ -943,6 +1260,7 @@ namespace DeployKeyGitClient
                     MessageBox.Show("Select project folder.");
                     return;
                 }
+
                 var ok = await AppLogic.ReapplyProtectedFunctionsAsync(projectRoot, Log);
                 MessageBox.Show(ok ? "Reapplied protected functions where matches found." : "No protected functions reapplied (check logs).");
             }
@@ -963,8 +1281,14 @@ namespace DeployKeyGitClient
                     MessageBox.Show("Select project folder.");
                     return;
                 }
+
                 var rel = txtControllerRelPath.Text?.Trim();
-                if (string.IsNullOrEmpty(rel)) { MessageBox.Show("Set controller relative path."); return; }
+                if (string.IsNullOrEmpty(rel))
+                {
+                    MessageBox.Show("Set controller relative path.");
+                    return;
+                }
+
                 await AppLogic.ToggleSkipWorktreeAsync(projectRoot, rel, Log);
                 MessageBox.Show("Toggled skip-worktree for file (file-level protection).");
             }
@@ -975,7 +1299,104 @@ namespace DeployKeyGitClient
             }
         }
 
-        // ---------------- RSA helpers (same as before) ----------------
+        // ---------------- Security / Unlock helpers ----------------
+
+        private void BtnChangeUnlockPassword_Click(object? sender, EventArgs e)
+        {
+            ChangeUnlockPasswordViaAdmin();
+        }
+
+        private void PromptUnlockIfNeeded()
+        {
+            if (!_isLocked) return;
+            try
+            {
+                using var lockDlg = new LockForm(pw => _creds.VerifyUserPassword(pw), "Unlock Deploy-Key Git Client");
+                var res = lockDlg.ShowDialog(this);
+                if (res == DialogResult.OK)
+                {
+                    _isLocked = false;
+                    Log("Application unlocked.");
+                }
+                else
+                {
+                    Log("Unlock canceled - exiting.");
+                    Application.Exit();
+                }
+            }
+            catch (Exception ex)
+            {
+                Log("Unlock prompt error: " + ex.Message);
+                Application.Exit();
+            }
+        }
+
+        // Admin-guarded method to change the unlock password.
+        // Admin password itself cannot be changed after first set.
+        private void ChangeUnlockPasswordViaAdmin()
+        {
+            try
+            {
+                // Ask for admin password first
+                using var adminDlg = new Form
+                {
+                    Width = 420,
+                    Height = 170,
+                    StartPosition = FormStartPosition.CenterParent,
+                    Text = "Verify Admin Password",
+                    FormBorderStyle = FormBorderStyle.FixedDialog
+                };
+                var lbl = new Label { Text = "Enter admin password:", Left = 12, Top = 12, Width = 380 };
+                var txt = new TextBox { Left = 12, Top = 36, Width = 380, UseSystemPasswordChar = true };
+                var btn = new Button { Text = "Verify", Left = 12, Top = 72, Width = 120, DialogResult = DialogResult.OK };
+                var btnCancel = new Button { Text = "Cancel", Left = 152, Top = 72, Width = 120, DialogResult = DialogResult.Cancel };
+                adminDlg.Controls.AddRange(new Control[] { lbl, txt, btn, btnCancel });
+                adminDlg.AcceptButton = btn;
+
+                if (adminDlg.ShowDialog(this) != DialogResult.OK) return;
+                if (!_creds.VerifyAdminPassword(txt.Text))
+                {
+                    MessageBox.Show("Admin password incorrect.");
+                    return;
+                }
+
+                // Now ask for new unlock password
+                using var setDlg = new Form
+                {
+                    Width = 520,
+                    Height = 190,
+                    StartPosition = FormStartPosition.CenterParent,
+                    Text = "Set New Unlock Password",
+                    FormBorderStyle = FormBorderStyle.FixedDialog
+                };
+                var lbl2 = new Label { Text = "Enter new unlock password:", Left = 12, Top = 12, Width = 480 };
+                var np1 = new TextBox { Left = 12, Top = 36, Width = 480, UseSystemPasswordChar = true };
+                var np2 = new TextBox { Left = 12, Top = 72, Width = 480, UseSystemPasswordChar = true };
+                var ok = new Button { Text = "Set Unlock Password", Left = 12, Top = 108, Width = 180, DialogResult = DialogResult.OK };
+                var cancel = new Button { Text = "Cancel", Left = 204, Top = 108, Width = 120, DialogResult = DialogResult.Cancel };
+                setDlg.Controls.AddRange(new Control[] { lbl2, np1, np2, ok, cancel });
+                setDlg.AcceptButton = ok;
+
+                if (setDlg.ShowDialog(this) == DialogResult.OK)
+                {
+                    if (string.IsNullOrEmpty(np1.Text) || np1.Text != np2.Text)
+                    {
+                        MessageBox.Show("Passwords empty or do not match.");
+                        return;
+                    }
+
+                    _creds.SetUserPassword(np1.Text);
+                    MessageBox.Show("Unlock password updated.");
+                }
+            }
+            catch (Exception ex)
+            {
+                Log("ChangeUnlockPasswordViaAdmin error: " + ex.Message);
+                MessageBox.Show("Failed to change unlock password.");
+            }
+        }
+
+        // ---------------- RSA helpers ----------------
 
         public (string privatePem, string publicSsh) GenerateRsaOpenSshKeyPair(int bits = 4096, string comment = "deploy@client")
         {
@@ -997,7 +1418,8 @@ namespace DeployKeyGitClient
             var b64 = Convert.ToBase64String(derBytes);
             var sb = new StringBuilder();
             sb.AppendLine($"-----BEGIN {label}-----");
-            for (int i = 0; i < b64.Length; i += lineLen) sb.AppendLine(b64.Substring(i, Math.Min(lineLen, b64.Length - i)));
+            for (int i = 0; i < b64.Length; i += lineLen)
+                sb.AppendLine(b64.Substring(i, Math.Min(lineLen, b64.Length - i)));
             sb.AppendLine($"-----END {label}-----");
             return sb.ToString();
         }
@@ -1042,9 +1464,12 @@ namespace DeployKeyGitClient
 
             var alg = Encoding.ASCII.GetBytes("ssh-rsa");
             using var outMs = new MemoryStream();
-            outMs.Write(MakeString(alg), 0, MakeString(alg).Length);
-            outMs.Write(MakeMpInt(exponent), 0, MakeMpInt(exponent).Length);
-            outMs.Write(MakeMpInt(modulus), 0, MakeMpInt(modulus).Length);
+            var algStr = MakeString(alg);
+            var eStr = MakeMpInt(exponent);
+            var nStr = MakeMpInt(modulus);
+            outMs.Write(algStr, 0, algStr.Length);
+            outMs.Write(eStr, 0, eStr.Length);
+            outMs.Write(nStr, 0, nStr.Length);
             return outMs.ToArray();
         }
     }

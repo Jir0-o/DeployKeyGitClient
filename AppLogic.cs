@@ -120,6 +120,7 @@ namespace DeployKeyGitClient
             progress?.Invoke(0);
             var env = CreateGitSshEnv(privateKeyPath);
 
+            // Check local changes
             var status = await RunProcessCaptureAsync("git", "status --porcelain", env, targetFolder, log);
             bool hasLocalChanges = !string.IsNullOrWhiteSpace(status.stdout);
             if (hasLocalChanges)
@@ -129,10 +130,35 @@ namespace DeployKeyGitClient
                 log($"stash exit {stash.code}");
             }
 
+            // Fetch remote
             var fetch = await RunProcessCaptureAsync("git", "fetch --all --prune", env, targetFolder, log);
             log($"fetch exit {fetch.code}");
-            progress?.Invoke(40);
+            progress?.Invoke(30);
 
+            // Check if branch is behind remote (only then do we pull/merge)
+            var branchStatus = await RunProcessCaptureAsync("git", "status -sb", env, targetFolder, log);
+            var branchOut = branchStatus.stdout ?? string.Empty;
+
+            // Example: "## main...origin/main [behind 1]"
+            bool isBehind = branchOut.Contains("behind", StringComparison.OrdinalIgnoreCase);
+
+            if (!isBehind)
+            {
+                log("No remote updates detected (branch is not behind). Skipping pull.");
+                progress?.Invoke(100);
+
+                if (hasLocalChanges)
+                {
+                    var pop = await RunProcessCaptureAsync("git", "stash pop", env, targetFolder, log);
+                    log($"stash pop exit {pop.code}");
+                }
+
+                return;
+            }
+
+            log("Remote has new commits. Applying pull/merge.");
+
+            // Try fast-forward merge first
             var merge = await RunProcessCaptureAsync("git", "merge --ff-only @{u}", env, targetFolder, log);
             if (merge.code != 0)
             {
