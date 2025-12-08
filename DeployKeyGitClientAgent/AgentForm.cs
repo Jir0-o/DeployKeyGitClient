@@ -38,26 +38,49 @@ namespace DeployKeyGitClientAgent
             // Load settings once at startup
             LoadSettings();
 
-            // Tray icon so user knows it's running
+            // Tray menu
             _trayMenu = new ContextMenuStrip();
             _trayMenu.Items.Add("Pull now", null, async (s, ea) => await RunPullAsync());
             _trayMenu.Items.Add("Open main app (admin)", null, (s, ea) => LaunchMainAsAdmin());
             _trayMenu.Items.Add("Exit agent", null, (s, ea) => Application.Exit());
 
+            // SAFE tray icon loading: try agent.ico, fallback to default icon
+            System.Drawing.Icon trayIconImage;
+            try
+            {
+                var baseDir = AppDomain.CurrentDomain.BaseDirectory;
+                var iconPath = Path.Combine(baseDir, "agent.ico");
+
+                if (File.Exists(iconPath))
+                {
+                    trayIconImage = new System.Drawing.Icon(iconPath);
+                    LogToFile("Agent: Loaded tray icon from " + iconPath);
+                }
+                else
+                {
+                    trayIconImage = System.Drawing.SystemIcons.Application;
+                    LogToFile("Agent: agent.ico not found, using default system icon.");
+                }
+            }
+            catch (Exception ex)
+            {
+                trayIconImage = System.Drawing.SystemIcons.Application;
+                LogToFile("Agent: error loading tray icon, using default. " + ex.Message);
+            }
+
             _trayIcon = new NotifyIcon
             {
                 Visible = true,
                 Text = "DeployKeyGitClient Agent",
-                Icon = System.Drawing.SystemIcons.Application, // replace with your .ico if you want
+                Icon = trayIconImage,
                 ContextMenuStrip = _trayMenu
             };
 
             _trayIcon.DoubleClick += async (s, ea) => await RunPullAsync();
 
-            // Timer: 1 hour
+            // Timer: 2 minutes (test). For production: 60 * 60 * 1000;
             _timer = new System.Windows.Forms.Timer();
-            _timer.Interval = 60 * 60 * 1000; // 1 hour
-            // For testing, you can temporarily set: _timer.Interval = 5 * 60 * 1000;
+            _timer.Interval = 2 * 60 * 1000; // 2 minutes
             _timer.Tick += async (s, ea) => await RunPullAsync();
             _timer.Start();
 
@@ -90,7 +113,7 @@ namespace DeployKeyGitClientAgent
                 settings.TryGetValue("GitBranch", out var branchVal);
 
                 _repoFolder = (installFolder ?? "").Trim();
-                _keyFolder  = (keyFolderVal ?? "").Trim();
+                _keyFolder = (keyFolderVal ?? "").Trim();
 
                 _branchName = string.IsNullOrWhiteSpace(branchVal)
                     ? null

@@ -20,3 +20,4 @@ C:\Users\Jiro\Desktop\DeployKeyGitClient\DeployKeyGitClientAgent\obj\Release\net
 C:\Users\Jiro\Desktop\DeployKeyGitClient\DeployKeyGitClientAgent\obj\Release\net8.0-windows\win-x64\DeployKeyGitClientAgent.pdb
 C:\Users\Jiro\Desktop\DeployKeyGitClient\DeployKeyGitClientAgent\obj\Release\net8.0-windows\win-x64\DeployKeyGitClientAgent.genruntimeconfig.cache
 C:\Users\Jiro\Desktop\DeployKeyGitClient\DeployKeyGitClientAgent\obj\Release\net8.0-windows\win-x64\ref\DeployKeyGitClientAgent.dll
+C:\Users\Jiro\Desktop\DeployKeyGitClient\DeployKeyGitClientAgent\bin\Release\net8.0-windows\win-x64\agent.ico

@@ -18,6 +18,8 @@ CloseApplications=yes
 Source: "publish\win-x64\DeployKeyGitClient.exe"; DestDir: "{app}"; Flags: ignoreversion
 ; Background agent (non-admin)
 Source: "publish\win-x64\DeployKeyGitClientAgent.exe"; DestDir: "{app}"; Flags: ignoreversion
+; Agent tray icon
+Source: "publish\win-x64\agent.ico"; DestDir: "{app}"; Flags: ignoreversion
 ; Other files
 Source: "publish\win-x64\*"; DestDir: "{app}"; Flags: recursesubdirs createallsubdirs
 

@@ -10,6 +10,7 @@
     <AssemblyName>DeployKeyGitClient</AssemblyName>
     <RootNamespace>DeployKeyGitClient</RootNamespace>
     <ApplicationManifest>app.manifest</ApplicationManifest>
+    <ApplicationIcon>icon.ico</ApplicationIcon>
   </PropertyGroup>
 
   <ItemGroup>

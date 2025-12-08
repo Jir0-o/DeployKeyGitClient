@@ -1,4 +1,5 @@
 C:\Users\Jiro\Desktop\DeployKeyGitClient\publish\win-x64\DeployKeyGitClient.exe
+C:\Users\Jiro\Desktop\DeployKeyGitClient\publish\win-x64\agent.ico
 C:\Users\Jiro\Desktop\DeployKeyGitClient\publish\win-x64\DeployKeyGitClientAgent.exe
 C:\Users\Jiro\Desktop\DeployKeyGitClient\publish\win-x64\DeployKeyGitClient.deps.json
 C:\Users\Jiro\Desktop\DeployKeyGitClient\publish\win-x64\DeployKeyGitClient.runtimeconfig.json

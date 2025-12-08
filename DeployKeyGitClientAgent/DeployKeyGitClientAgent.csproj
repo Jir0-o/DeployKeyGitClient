@@ -5,12 +5,17 @@
     <TargetFramework>net8.0-windows</TargetFramework>
     <UseWindowsForms>true</UseWindowsForms>
     <ImplicitUsings>enable</ImplicitUsings>
+    <Company>USSBD</Company>
     <Nullable>enable</Nullable>
+    <ApplicationIcon>agent.ico</ApplicationIcon>
   </PropertyGroup>
 
   <ItemGroup>
     <!-- So the agent can reuse AppLogic, SettingsManager, etc. -->
     <ProjectReference Include="..\DeployKeyGitClient.csproj" />
+    <Content Include="agent.ico">
+      <CopyToOutputDirectory>Always</CopyToOutputDirectory>
+    </Content>
   </ItemGroup>
 
 </Project>

@@ -13,7 +13,7 @@ using System.Reflection;
 [assembly: System.Reflection.AssemblyCompanyAttribute("USSBD")]
 [assembly: System.Reflection.AssemblyConfigurationAttribute("Release")]
 [assembly: System.Reflection.AssemblyFileVersionAttribute("1.0.0.0")]
-[assembly: System.Reflection.AssemblyInformationalVersionAttribute("1.0.0+2968753b9d027a0e00d4cd5640ae4e58c9283d4a")]
+[assembly: System.Reflection.AssemblyInformationalVersionAttribute("1.0.0+2aa03f1c5e55d869f35298a43465f63ddade3bb7")]
 [assembly: System.Reflection.AssemblyProductAttribute("DeployKeyGitClient")]
 [assembly: System.Reflection.AssemblyTitleAttribute("DeployKeyGitClient")]
 [assembly: System.Reflection.AssemblyVersionAttribute("1.0.0.0")]
