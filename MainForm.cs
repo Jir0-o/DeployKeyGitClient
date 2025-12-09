@@ -502,7 +502,7 @@ namespace DeployKeyGitClient
             btnRegisterDevice = new Button { Text = "Register Device (Backoffice)", AutoSize = true };
             btnRegisterDevice.Click += BtnRegisterDevice_Click;
             apiRow.Controls.Add(btnRegisterDevice);
-            apiRow.Controls.Add(new Label { Text = "API URL to apply (OrderController):", AutoSize = true, Padding = new Padding(10, 8, 0, 0) });
+            apiRow.Controls.Add(new Label { Text = "API URL to apply (.env):", AutoSize = true, Padding = new Padding(10, 8, 0, 0) });
             txtApiUrl = new TextBox { Width = 340, Text = "https://api.example.com/sync" };
             btnApplyApiUrl = new Button { Text = "Apply API URL", AutoSize = true };
             btnApplyApiUrl.Click += BtnApplyApiUrl_Click;
@@ -1393,8 +1393,20 @@ namespace DeployKeyGitClient
         {
             try
             {
-                var ok = await AppLogic.ApplyProcessorIdToBackofficeControllerAsync(txtInstallFolder.Text.Trim(), Log);
-                MessageBox.Show(ok ? "ProcessorId applied and file protected." : "ProcessorId update failed or pattern not found.");
+                var projectRoot = txtInstallFolder.Text?.Trim();
+                if (string.IsNullOrEmpty(projectRoot) || !Directory.Exists(projectRoot))
+                {
+                    MessageBox.Show("Select project folder first.");
+                    return;
+                }
+
+                var ok = await AppLogic.ApplyProcessorIdToBackofficeControllerAsync(projectRoot, Log);
+
+                MessageBox.Show(
+                    ok
+                        ? "ProcessorId applied to .env (BACKOFFICE_ALLOWED_PROCESSOR_ID)."
+                        : "ProcessorId update failed. See log for details."
+                );
             }
             catch (Exception ex)
             {
@@ -1403,7 +1415,7 @@ namespace DeployKeyGitClient
             }
         }
 
-        private async void BtnApplyApiUrl_Click(object? sender, EventArgs e)
+        private void BtnApplyApiUrl_Click(object? sender, EventArgs e)
         {
             try
             {
@@ -1421,27 +1433,47 @@ namespace DeployKeyGitClient
                     return;
                 }
 
-                var rel = "app/Http/Controllers/Sales/OrderController.php";
-                var file = Path.Combine(projectRoot, rel.Replace('/', Path.DirectorySeparatorChar));
-                if (!File.Exists(file))
+                var envPath = Path.Combine(projectRoot, ".env");
+                if (!File.Exists(envPath))
                 {
-                    MessageBox.Show($"Controller not found at {file}");
+                    MessageBox.Show(".env file not found in project root. Generate .env first.");
                     return;
                 }
 
-                var bak = file + ".deploybak." + DateTime.Now.ToString("yyyyMMddHHmmss");
-                File.Copy(file, bak);
-                Log($"Backup created: {bak}");
+                // Read current .env
+                var text = File.ReadAllText(envPath, Encoding.UTF8);
 
-                var text = File.ReadAllText(file, Encoding.UTF8);
-                var replaced = Regex.Replace(text, @"Http::post\(\s*(['""]?)#\1\s*,", $"Http::post('{url}',", RegexOptions.IgnoreCase);
-                if (replaced == text)
-                    replaced = text.Replace("Http::post('#'", $"Http::post('{url}'");
+                const string key = "SYNC_LOG_API_URL";
+                var pattern = $"^{Regex.Escape(key)}=.*$";
 
-                File.WriteAllText(file, replaced, Encoding.UTF8);
-                Log("OrderController.php patched with API URL.");
-                await AppLogic.ToggleSkipWorktreeAsync(projectRoot, rel, Log);
-                MessageBox.Show("API URL applied and file marked skip-worktree (protected).");
+                // If key exists → replace line, else append new line
+                if (Regex.IsMatch(text, pattern, RegexOptions.Multiline))
+                {
+                    text = Regex.Replace(
+                        text,
+                        pattern,
+                        $"{key}={url}",
+                        RegexOptions.Multiline
+                    );
+                }
+                else
+                {
+                    if (!text.EndsWith(Environment.NewLine))
+                        text += Environment.NewLine;
+
+                    text += $"{key}={url}" + Environment.NewLine;
+                }
+
+                // Backup .env before writing
+                var backup = envPath + ".bak." + DateTime.Now.ToString("yyyyMMddHHmmss");
+                File.Copy(envPath, backup, true);
+                Log("Backed up .env to: " + backup);
+
+                // Write updated .env
+                File.WriteAllText(envPath, text, Encoding.UTF8);
+                Log($"Updated {key} in .env to: {url}");
+
+                MessageBox.Show("API URL applied to .env (SYNC_LOG_API_URL).");
             }
             catch (Exception ex)
             {
@@ -1449,6 +1481,7 @@ namespace DeployKeyGitClient
                 MessageBox.Show("Apply API URL error: " + ex.Message);
             }
         }
+
 
         private async void BtnToggleSkipWorktree_Click(object? sender, EventArgs e)
         {

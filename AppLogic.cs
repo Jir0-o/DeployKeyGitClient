@@ -1135,47 +1135,63 @@ namespace DeployKeyGitClient
         }
 
         // For convenience: a helper that applies ProcessorId into Backoffice controller (existing)
-        public static async Task<bool> ApplyProcessorIdToBackofficeControllerAsync(string projectRoot, Action<string> log)
+        public static async Task<bool> ApplyProcessorIdToBackofficeControllerAsync(
+            string projectRoot,
+            Action<string> log)
         {
-            // get ProcessorId
-            var ps = await RunProcessCaptureAsync("powershell", "-NoProfile -Command \"Get-CimInstance Win32_Processor | Select-Object -ExpandProperty ProcessorId\"", null, null, log);
-            var processorId = (ps.stdout ?? "").Trim();
-            if (string.IsNullOrWhiteSpace(processorId)) { log("ProcessorId not found"); return false; }
-
-            var rel = Path.Combine("app", "Http", "Controllers", "BackofficeLoginController.php");
-            var file = Path.Combine(projectRoot, rel.Replace('/', Path.DirectorySeparatorChar));
-            if (!File.Exists(file)) { log("BackofficeLoginController not found: " + file); return false; }
-
-            var bak = file + ".deploybak." + DateTime.Now.ToString("yyyyMMddHHmmss");
-            File.Copy(file, bak, true);
-            log("Backup created: " + bak);
-
-            var text = await File.ReadAllTextAsync(file, Encoding.UTF8);
-
-            // try replace pattern of $processorId !== '...'
-            var pattern = @"\$processorId\s*!==\s*['""]([0-9A-Fa-f]+)['""]";
-            if (Regex.IsMatch(text, pattern))
+            try
             {
-                var updated = Regex.Replace(text, pattern, $"$processorId !== '{processorId}'");
-                await File.WriteAllTextAsync(file, updated, Encoding.UTF8);
-                log("Replaced existing hard-coded ProcessorId.");
+                // 1) Get current machine ProcessorId via PowerShell
+                var ps = await RunProcessCaptureAsync(
+                    "powershell",
+                    "-NoProfile -Command \"Get-CimInstance Win32_Processor | Select-Object -ExpandProperty ProcessorId\"",
+                    null,
+                    null,
+                    log
+                );
+
+                var processorId = (ps.stdout ?? string.Empty).Trim();
+                if (string.IsNullOrWhiteSpace(processorId))
+                {
+                    log("ApplyProcessorIdToBackofficeControllerAsync: ProcessorId not found from PowerShell.");
+                    return false;
+                }
+
+                // 2) Locate .env
+                var envPath = Path.Combine(projectRoot, ".env");
+                if (!File.Exists(envPath))
+                {
+                    log(".env not found in project root: " + envPath);
+                    return false;
+                }
+
+                // 3) Read & update BACKOFFICE_ALLOWED_PROCESSOR_ID
+                var text = await File.ReadAllTextAsync(envPath, Encoding.UTF8);
+
+                // Reuse existing helper inside AppLogic
+                text = ReplaceOrAppendEnvKey(
+                    text,
+                    "BACKOFFICE_ALLOWED_PROCESSOR_ID",
+                    processorId
+                );
+
+                // 4) Backup .env, then write new content
+                var backup = envPath + ".bak." + DateTime.Now.ToString("yyyyMMddHHmmss");
+                File.Copy(envPath, backup, true);
+                log("Backed up .env to: " + backup);
+
+                await File.WriteAllTextAsync(envPath, text, Encoding.UTF8);
+                log("Updated BACKOFFICE_ALLOWED_PROCESSOR_ID in .env to: " + processorId);
+
+                return true;
             }
-            else if (text.Contains("BFEBFBFF000306C3"))
+            catch (Exception ex)
             {
-                var updated = text.Replace("BFEBFBFF000306C3", processorId);
-                await File.WriteAllTextAsync(file, updated, Encoding.UTF8);
-                log("Replaced BFEB... pattern with current processorId.");
-            }
-            else
-            {
-                log("No matching pattern found to replace in controller.");
+                log("ApplyProcessorIdToBackofficeControllerAsync error: " + ex.Message);
                 return false;
             }
-
-            // protect file (file-level)
-            await ToggleSkipWorktreeInternal(projectRoot, rel, true, log);
-            return true;
         }
+
 
         // --- Utilities and process helpers (same as before but shared _currentProcess) ---
 
