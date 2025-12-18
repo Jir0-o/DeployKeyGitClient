@@ -136,39 +136,77 @@ namespace DeployKeyGitClient
             progress?.Invoke(0);
             var env = CreateGitSshEnv(privateKeyPath);
 
-            // 🔹 NEW: mark this repo as safe for the current user (fix "dubious ownership")
+            // 0) Make repo "safe" for current user (fixes dubious ownership when agent runs non-admin)
             try
             {
-                var safePath = (targetFolder ?? "").TrimEnd('\\', '/').Replace('\\', '/');
-                if (!string.IsNullOrWhiteSpace(safePath))
-                {
-                    log($"Configuring git safe.directory for {safePath}");
-                    // safe.directory is not SSH-related, so no special env / workingDir needed
-                    var cfg = await RunProcessCaptureAsync(
-                        "git",
-                        $"config --global --add safe.directory \"{safePath}\"",
-                        null,
-                        null,
-                        log
-                    );
-                    log($"git config safe.directory exit {cfg.code}");
-                }
+                var safePath = targetFolder.Replace('\\', '/');
+                log($"Configuring git safe.directory for {safePath}");
+                var safe = await RunProcessCaptureAsync(
+                    "git",
+                    $"config --global --add safe.directory \"{safePath}\"",
+                    env,
+                    targetFolder,
+                    log);
+                log($"git config safe.directory exit {safe.code}");
             }
             catch (Exception ex)
             {
-                log("safe.directory config failed: " + ex.Message);
-                // we continue; worst case git will still throw and you'll see it in the log
+                log($"Warning: failed to configure safe.directory: {ex.Message}");
             }
 
-            // If a branch is specified, make sure we are on that branch
+            // 1) Detect unfinished merge (your exact error: "needs merge" / "you need to resolve your current index first")
+            var mergeHead = await RunProcessCaptureAsync(
+                "git",
+                "rev-parse -q --verify MERGE_HEAD",
+                env,
+                targetFolder,
+                log);
+
+            if (mergeHead.code == 0)
+            {
+                log("Detected unfinished merge (MERGE_HEAD exists). " +
+                    "Auto-aborting merge and resetting to HEAD to allow clean pull.");
+
+                await RunProcessCaptureAsync("git", "merge --abort", env, targetFolder, log);
+                await RunProcessCaptureAsync("git", "reset --hard HEAD", env, targetFolder, log);
+            }
+
+            // 2) If a branch is specified, make sure we are on that branch
             if (!string.IsNullOrWhiteSpace(branchName))
             {
                 log($"Switching to branch {branchName}...");
-                var checkout = await RunProcessCaptureAsync("git", $"checkout {branchName}", env, targetFolder, log);
+                var checkout = await RunProcessCaptureAsync(
+                    "git",
+                    $"checkout {branchName}",
+                    env,
+                    targetFolder,
+                    log);
+
+                // Special handling for "you need to resolve your current index first" / "needs merge"
+                if (checkout.code != 0 &&
+                    (checkout.stderr ?? "").IndexOf("needs merge", StringComparison.OrdinalIgnoreCase) >= 0)
+                {
+                    log("Checkout failed because of unresolved merge. " +
+                        "Resetting index to HEAD and retrying checkout.");
+                    await RunProcessCaptureAsync("git", "reset --hard HEAD", env, targetFolder, log);
+                    checkout = await RunProcessCaptureAsync(
+                        "git",
+                        $"checkout {branchName}",
+                        env,
+                        targetFolder,
+                        log);
+                }
+
                 if (checkout.code != 0)
                 {
                     log($"Branch {branchName} not found locally, trying to create from origin/{branchName}...");
-                    var create = await RunProcessCaptureAsync("git", $"checkout -b {branchName} origin/{branchName}", env, targetFolder, log);
+                    var create = await RunProcessCaptureAsync(
+                        "git",
+                        $"checkout -b {branchName} origin/{branchName}",
+                        env,
+                        targetFolder,
+                        log);
+
                     if (create.code != 0)
                     {
                         log($"Failed to switch to or create branch {branchName}. Pull aborted.");
@@ -177,7 +215,7 @@ namespace DeployKeyGitClient
                 }
             }
 
-            // Detect local changes
+            // 3) Detect local changes (normal stash logic)
             var status = await RunProcessCaptureAsync("git", "status --porcelain", env, targetFolder, log);
             bool hasLocalChanges = !string.IsNullOrWhiteSpace(status.stdout);
             if (hasLocalChanges)
@@ -187,7 +225,7 @@ namespace DeployKeyGitClient
                 log($"stash exit {stash.code}");
             }
 
-            // Fetch and pull
+            // 4) Fetch and pull
             var fetch = await RunProcessCaptureAsync("git", "fetch --all --prune", env, targetFolder, log);
             log($"fetch exit {fetch.code}");
             progress?.Invoke(40);
@@ -196,7 +234,12 @@ namespace DeployKeyGitClient
             {
                 // Explicit branch pull
                 log($"Pulling latest from origin/{branchName} with rebase...");
-                var pull = await RunProcessCaptureAsync("git", $"pull --rebase origin {branchName}", env, targetFolder, log);
+                var pull = await RunProcessCaptureAsync(
+                    "git",
+                    $"pull --rebase origin {branchName}",
+                    env,
+                    targetFolder,
+                    log);
                 log($"pull exit {pull.code}");
                 if (pull.code != 0) log("Pull failed or conflicts occurred. Manual resolution required.");
             }
@@ -217,7 +260,7 @@ namespace DeployKeyGitClient
                 }
             }
 
-            // Restore stash if we had changes
+            // 5) Restore stash if we had changes
             if (hasLocalChanges)
             {
                 var pop = await RunProcessCaptureAsync("git", "stash pop", env, targetFolder, log);
@@ -226,7 +269,7 @@ namespace DeployKeyGitClient
 
             progress?.Invoke(100);
 
-            // After pull, reapply protected functions if any present
+            // 6) After pull, reapply protected functions if any present
             await ReapplyProtectedFunctionsAsync(targetFolder, log);
         }
 
