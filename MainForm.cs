@@ -516,6 +516,58 @@ namespace DeployKeyGitClient
             btnToggleSkipWorktree = new Button { Text = "Toggle Skip-Worktree", AutoSize = true };
             btnToggleSkipWorktree.Click += BtnToggleSkipWorktree_Click;
 
+            // In the skipRow FlowLayoutPanel (around line where you add btnToggleSkipWorktree)
+            var btnTrackAndProtect = new Button 
+            { 
+                Text = "Track & Protect", 
+                AutoSize = true 
+            };
+            btnTrackAndProtect.Click += async (s, e) =>
+            {
+                try
+                {
+                    var projectRoot = txtInstallFolder.Text?.Trim();
+                    if (string.IsNullOrEmpty(projectRoot) || !Directory.Exists(projectRoot))
+                    {
+                        MessageBox.Show("Select project folder.");
+                        return;
+                    }
+
+                    var raw = txtSkipPath.Text?.Trim() ?? "";
+                    if (string.IsNullOrEmpty(raw))
+                    {
+                        MessageBox.Show("Enter path to protect.");
+                        return;
+                    }
+
+                    // Process paths
+                    var parts = raw
+                        .Split(new[] { '\r', '\n', ',', ';' }, StringSplitOptions.RemoveEmptyEntries)
+                        .Select(p => p.Trim())
+                        .Where(p => !string.IsNullOrWhiteSpace(p))
+                        .ToArray();
+
+                    if (parts.Length == 0)
+                    {
+                        MessageBox.Show("No valid paths to protect.");
+                        return;
+                    }
+
+                    foreach (var path in parts)
+                    {
+                        await AppLogic.TrackAndProtectFileAsync(projectRoot, path, Log);
+                    }
+                    
+                    MessageBox.Show($"Attempted to track and protect {parts.Length} path(s). Check log for details.");
+                }
+                catch (Exception ex)
+                {
+                    Log($"ERROR: {ex.Message}");
+                    MessageBox.Show($"Error: {ex.Message}");
+                }
+            };
+            skipRow.Controls.Add(btnTrackAndProtect);
+
             // NEW reset button
             btnResetSkipWorktree = new Button
             {

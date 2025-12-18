@@ -543,6 +543,8 @@ namespace DeployKeyGitClient
             {
                 log?.Invoke("ToggleSkipWorktreeInternal error: " + ex.Message);
             }
+
+             await ToggleSkipWorktreeInternalWithTrackCheck(projectRoot, relPath, setSkip, log);
         }
 
 
@@ -625,6 +627,7 @@ namespace DeployKeyGitClient
                     continue;
 
                 var fullPath = Path.Combine(projectRoot, normalized.Replace('/', Path.DirectorySeparatorChar));
+                
                 if (Directory.Exists(fullPath))
                 {
                     log?.Invoke($"[skip] '{normalized}' is a folder. Applying skip-worktree to all tracked files under it.");
@@ -646,14 +649,154 @@ namespace DeployKeyGitClient
 
                     foreach (var f in files)
                     {
-                        await ToggleSkipWorktreeInternal(projectRoot, f, null, log);
+                        await ToggleSkipWorktreeInternalWithTrackCheck(projectRoot, f, null, log);
                     }
                 }
                 else
                 {
-                    // Treat as single file
-                    await ToggleSkipWorktreeInternal(projectRoot, normalized, null, log);
+                    // Treat as single file - use the improved version that checks if tracked
+                    await ToggleSkipWorktreeInternalWithTrackCheck(projectRoot, normalized, null, log);
                 }
+            }
+        }
+
+        // New method that checks if file is tracked before applying skip-worktree
+        private static async Task ToggleSkipWorktreeInternalWithTrackCheck(
+            string projectRoot,
+            string relPath,
+            bool? setSkip,
+            Action<string> log)
+        {
+            try
+            {
+                var path = relPath.Replace('\\', '/').TrimStart('/');
+
+                // FIRST: Check if file exists
+                var fullPath = Path.Combine(projectRoot, path.Replace('/', Path.DirectorySeparatorChar));
+                if (!File.Exists(fullPath) && !Directory.Exists(fullPath))
+                {
+                    log?.Invoke($"File/folder does not exist: '{path}'. Skipping.");
+                    return;
+                }
+
+                // SECOND: Check if path is tracked by git (using ls-files --error-unmatch)
+                var checkTracked = await RunProcessCaptureAsync("git", $"ls-files --error-unmatch \"{path}\"", null, projectRoot, log);
+                
+                if (checkTracked.code != 0 || string.IsNullOrWhiteSpace(checkTracked.stdout))
+                {
+                    log?.Invoke($"'{path}' is not tracked by git. It may be ignored or never committed. skip-worktree only works on tracked files.");
+                    return;
+                }
+
+                // THIRD: Check current skip-worktree status
+                var check = await RunProcessCaptureAsync("git", $"ls-files -v \"{path}\"", null, projectRoot, log);
+                var output = check.stdout ?? string.Empty;
+                var firstLine = output.Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries)
+                                    .FirstOrDefault() ?? "";
+                var isSkipped = firstLine.Length > 0 && firstLine[0] == 'S';
+
+                // FOURTH: Apply or remove skip-worktree
+                if (setSkip == true || (setSkip == null && !isSkipped))
+                {
+                    // Apply skip-worktree
+                    var r = await RunProcessCaptureAsync("git", $"update-index --skip-worktree \"{path}\"", null, projectRoot, log);
+                    log?.Invoke($"git update-index --skip-worktree \"{path}\" exit {r.code}");
+                    if (r.code == 0)
+                    {
+                        log?.Invoke($"✓ Successfully protected '{path}' with skip-worktree");
+                    }
+                    else if (!string.IsNullOrWhiteSpace(r.stderr))
+                    {
+                        log?.Invoke("ERR: " + r.stderr);
+                    }
+                }
+                else if (setSkip == false || (setSkip == null && isSkipped))
+                {
+                    // Remove skip-worktree
+                    var r = await RunProcessCaptureAsync("git", $"update-index --no-skip-worktree \"{path}\"", null, projectRoot, log);
+                    log?.Invoke($"git update-index --no-skip-worktree \"{path}\" exit {r.code}");
+                    if (r.code == 0)
+                    {
+                        log?.Invoke($"✓ Removed skip-worktree protection from '{path}'");
+                    }
+                    else if (!string.IsNullOrWhiteSpace(r.stderr))
+                    {
+                        log?.Invoke("ERR: " + r.stderr);
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                log?.Invoke("ToggleSkipWorktreeInternal error: " + ex.Message);
+            }
+        }
+
+        public static async Task<bool> TrackAndProtectFileAsync(string projectRoot, string relPath, Action<string> log)
+        {
+            try
+            {
+                var path = relPath.Replace('\\', '/').TrimStart('/');
+                var fullPath = Path.Combine(projectRoot, path.Replace('/', Path.DirectorySeparatorChar));
+                
+                if (!File.Exists(fullPath) && !Directory.Exists(fullPath))
+                {
+                    log($"File/folder does not exist: '{path}'");
+                    return false;
+                }
+
+                // Check if tracked
+                var checkTracked = await RunProcessCaptureAsync("git", $"ls-files --error-unmatch \"{path}\"", null, projectRoot, log);
+                
+                if (checkTracked.code != 0 || string.IsNullOrWhiteSpace(checkTracked.stdout))
+                {
+                    // Not tracked - ask to add
+                    log($"File '{path}' is not tracked by git.");
+                    
+                    // Try to add it
+                    var addResult = await RunProcessCaptureAsync("git", $"add \"{path}\"", null, projectRoot, log);
+                    
+                    if (addResult.code == 0)
+                    {
+                        log($"✓ Added '{path}' to git tracking.");
+                        
+                        // Commit the file
+                        var commitResult = await RunProcessCaptureAsync(
+                            "git", 
+                            $"commit -m \"Add {Path.GetFileName(path)} for skip-worktree protection\"", 
+                            null, 
+                            projectRoot, 
+                            log);
+                        
+                        if (commitResult.code == 0)
+                        {
+                            log($"✓ Committed '{path}' to git.");
+                        }
+                    }
+                    else
+                    {
+                        log($"Failed to add file to git: {addResult.stderr}");
+                        return false;
+                    }
+                }
+
+                // Now apply skip-worktree
+                var skipResult = await RunProcessCaptureAsync("git", $"update-index --skip-worktree \"{path}\"", null, projectRoot, log);
+                
+                if (skipResult.code == 0)
+                {
+                    log($"✓ Successfully protected '{path}' with skip-worktree");
+                    return true;
+                }
+                else
+                {
+                    log($"Failed to protect '{path}': {skipResult.stderr}");
+                    return false;
+                }
+            }
+            catch (Exception ex)
+            {
+                log($"TrackAndProtectFileAsync error: {ex.Message}");
+                return false;
             }
         }
 
